@@ -96,6 +96,30 @@
       <div class="prog" id="prog"></div>
     </div>
 
+    <div class="card full">
+      <p class="label">Campanha (vários dias · rampa + janela)</p>
+      <p class="hint">Cola a lista uma vez; o bot envia um pouco por dia (rampa) dentro da janela, retomando após reinício. Nasce <b>pausada</b> — revise a contagem/rampa e clique Iniciar.</p>
+      <div class="field" style="margin-top:8px">
+        <p class="hint">Mensagem</p>
+        <textarea id="cmsg" rows="4" placeholder="Mensagem da campanha…"></textarea>
+      </div>
+      <div class="field">
+        <p class="hint">Lista de números (um por linha; duplicatas são removidas)</p>
+        <textarea id="cnums" rows="5" placeholder="11999998888&#10;..."></textarea>
+      </div>
+      <div class="row">
+        <label class="check">Espalhar em <input type="text" id="cdias" value="15" style="width:54px;text-align:center" /> dias</label>
+        <button id="btnProgramar">Programar campanha</button>
+      </div>
+      <div class="msg" id="msgCampanha"></div>
+      <div class="prog" id="campStatus"></div>
+      <div class="row" id="campAcoes" style="display:none;margin-top:10px">
+        <button id="btnIniciar">Iniciar</button>
+        <button class="ghost" id="btnPausar">Pausar</button>
+        <button class="ghost" id="btnCancelar">Cancelar</button>
+      </div>
+    </div>
+
     <pre class="log" id="log"></pre>
 
     <script>
@@ -133,6 +157,25 @@
             : ''
           document.getElementById('btnDisparar').disabled = enviando || !d.ready
           document.getElementById('btnTeste').disabled = enviando || !d.ready
+
+          // Campanha
+          const cs = document.getElementById('campStatus')
+          const ca = document.getElementById('campAcoes')
+          const c = d.campanha
+          if (c) {
+            const estado = c.concluida ? 'CONCLUÍDA' : (c.pausada ? 'PAUSADA' : 'ATIVA')
+            cs.innerHTML =
+              '<b>' + estado + '</b> · dia ' + c.dia + '/' + c.dias +
+              ' · hoje <b>' + c.enviadosHoje + '/' + c.capHoje + '</b>' +
+              ' · total <b>' + c.enviados + '/' + c.total + '</b> · ' + c.pendentes + ' pendentes · ' + c.falhas + ' falhas' +
+              '<br><span style="color:#8a8a8e">Rampa: ' + (c.plano || []).join(', ') + '</span>'
+            ca.style.display = 'flex'
+            document.getElementById('btnIniciar').style.display = (c.pausada && !c.concluida) ? '' : 'none'
+            document.getElementById('btnPausar').style.display = (!c.pausada && !c.concluida) ? '' : 'none'
+          } else {
+            cs.innerHTML = ''
+            ca.style.display = 'none'
+          }
         } catch (e) {}
       }
 
@@ -162,6 +205,39 @@
             !confirm('Disparar DE VERDADE para a lista? (dry-run desmarcado)')) return
         enviar({ soTeste: false })
       }
+
+      async function programar() {
+        const mensagem = document.getElementById('cmsg').value.trim()
+        const texto = document.getElementById('cnums').value
+        const dias = document.getElementById('cdias').value
+        const box = document.getElementById('msgCampanha')
+        box.className = 'msg'; box.textContent = ''
+        if (!mensagem) { box.className = 'msg err'; box.textContent = 'Escreva a mensagem da campanha.'; return }
+        try {
+          const r = await fetch('/api/campanha' + q, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mensagem, texto, dias }),
+          })
+          const dd = await r.json()
+          if (!r.ok) { box.className = 'msg err'; box.textContent = dd.erro || 'Erro.'; return }
+          box.className = 'msg ok'
+          box.textContent = 'Programada (PAUSADA): ' + dd.validos + ' números únicos (' + dd.duplicatas + ' duplicatas removidas) em ' + dd.dias + ' dias. Revise abaixo e clique Iniciar.'
+        } catch (e) { box.className = 'msg err'; box.textContent = 'Falha de rede.' }
+      }
+      async function acaoCampanha(acao) {
+        if (acao === 'iniciar' && !confirm('Iniciar a campanha? Vai começar a ENVIAR de verdade pra lista, ao longo dos dias.')) return
+        if (acao === 'cancelar' && !confirm('Cancelar a campanha? O progresso é perdido.')) return
+        try {
+          await fetch('/api/campanha/acao' + q, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ acao }),
+          })
+        } catch (e) {}
+      }
+      document.getElementById('btnProgramar').onclick = programar
+      document.getElementById('btnIniciar').onclick = () => acaoCampanha('iniciar')
+      document.getElementById('btnPausar').onclick = () => acaoCampanha('pausar')
+      document.getElementById('btnCancelar').onclick = () => acaoCampanha('cancelar')
 
       tick(); setInterval(tick, 2500)
     </script>

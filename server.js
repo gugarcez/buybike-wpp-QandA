@@ -4,7 +4,7 @@ import qrcodeTerminal from 'qrcode-terminal'
 import pkg from 'whatsapp-web.js'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
-import { readdirSync, rmSync, existsSync } from 'fs'
+import { readdirSync, rmSync, existsSync, writeFileSync, readFileSync } from 'fs'
 
 import { responderComoClaudia, CLAUDIA_SUPPRESS, RESPOSTA_MOCK } from './claudia.js'
 
@@ -39,6 +39,10 @@ const PAUSA_LOTE = Number(process.env.PAUSA_LOTE || 120000) // 2min entre lotes
 const JANELA_INICIO = Number(process.env.JANELA_INICIO || 9)
 const JANELA_FIM = Number(process.env.JANELA_FIM || 18)
 const JANELA_TZ = process.env.JANELA_TZ || 'America/Sao_Paulo'
+
+// Campanha multi-dia (fila persistente no volume + teto diário com rampa).
+const CAMPANHA_FILE = join(WWEB_AUTH, 'campanha.json')
+let campanha = null // objeto da campanha em andamento (ou null)
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min
@@ -264,6 +268,119 @@ async function disparar({ numeros, mensagem, dryRun, respeitarJanela }) {
   state.disparo.enviando = false
 }
 
+// ─── Campanha multi-dia (fila persistente + teto diário com rampa) ─────────────
+// Data YYYY-MM-DD na timezone da janela (pra contar "dia" e zerar o teto diário).
+function dataLocal() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: JANELA_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date())
+}
+
+// Rampa: caps diários que crescem de ~0.5x a ~1.5x da média, somando exatamente total.
+function planoRampa(total, dias) {
+  const w = []
+  for (let d = 0; d < dias; d++) w.push(0.5 + (dias > 1 ? d / (dias - 1) : 0))
+  const sw = w.reduce((a, b) => a + b, 0)
+  const plano = w.map((x) => Math.max(1, Math.round((total * x) / sw)))
+  let diff = total - plano.reduce((a, b) => a + b, 0)
+  let i = plano.length - 1
+  while (diff !== 0 && i >= 0) {
+    const step = diff > 0 ? 1 : -1
+    plano[i] += step
+    diff -= step
+    i--
+    if (i < 0) i = plano.length - 1
+  }
+  return plano
+}
+
+function salvarCampanha() {
+  try {
+    if (campanha) writeFileSync(CAMPANHA_FILE, JSON.stringify(campanha))
+    else if (existsSync(CAMPANHA_FILE)) rmSync(CAMPANHA_FILE, { force: true })
+  } catch (e) {
+    pushLog(`erro salvando campanha: ${e.message}`)
+  }
+}
+
+function carregarCampanha() {
+  try {
+    if (existsSync(CAMPANHA_FILE)) {
+      campanha = JSON.parse(readFileSync(CAMPANHA_FILE, 'utf8'))
+      pushLog(`Campanha carregada do volume: ${campanha.enviados.length}/${campanha.total} enviados, ${campanha.pendentes.length} pendentes, ${campanha.pausada ? 'PAUSADA' : 'ativa'}.`)
+    }
+  } catch (e) {
+    pushLog(`erro carregando campanha: ${e.message}`)
+  }
+}
+
+function capHoje() {
+  if (!campanha) return 0
+  return campanha.plano[Math.min(campanha.diaIndice, campanha.plano.length - 1)]
+}
+
+// Worker único: roda pra sempre, idle quando não há o que enviar. Respeita janela,
+// teto diário, pausa, e cede a vez pro disparo manual. Persiste a cada envio.
+let campanhaRodando = false
+async function rodarCampanha() {
+  if (campanhaRodando) return
+  campanhaRodando = true
+  for (;;) {
+    try {
+      if (!campanha || campanha.pausada || !campanha.pendentes.length) { await sleep(30000); continue }
+      if (!state.ready) { await sleep(30000); continue }
+
+      // Virou o dia? avança o índice do plano e zera o teto diário.
+      const hoje = dataLocal()
+      if (campanha.diaRef !== hoje) {
+        if (campanha.diaRef) campanha.diaIndice++
+        campanha.diaRef = hoje
+        campanha.enviadosHoje = 0
+        salvarCampanha()
+        pushLog(`Campanha: dia ${Math.min(campanha.diaIndice + 1, campanha.plano.length)}/${campanha.plano.length} (${hoje}), teto de hoje: ${capHoje()}.`)
+      }
+
+      if (!janelaAberta()) { await sleep(60000); continue }
+      if (campanha.enviadosHoje >= capHoje()) { await sleep(60000); continue } // teto do dia batido
+      if (state.disparo.enviando) { await sleep(5000); continue } // cede pro disparo manual
+
+      const n = campanha.pendentes[0]
+      try {
+        const numberId = await client.getNumberId(n)
+        if (!numberId) {
+          pushLog(`[campanha] ✗ ${n} — sem WhatsApp, pulando.`)
+          campanha.falhas.push(n)
+        } else {
+          await client.sendMessage(numberId._serialized, campanha.mensagem)
+          campanha.enviados.push(n)
+          pushLog(`[campanha] ✓ ${n} enviado (${campanha.enviados.length}/${campanha.total}).`)
+        }
+      } catch (e) {
+        pushLog(`[campanha] ✗ ${n} — erro: ${e.message}`)
+        campanha.falhas.push(n)
+      }
+      campanha.pendentes.shift()
+      campanha.enviadosHoje++
+      salvarCampanha()
+
+      if (!campanha.pendentes.length) {
+        pushLog(`Campanha CONCLUÍDA. Enviados: ${campanha.enviados.length} · Falhas: ${campanha.falhas.length}.`)
+        continue
+      }
+      // Freios anti-ban (iguais ao disparo): pausa a cada lote, senão delay aleatório.
+      if (campanha.enviadosHoje % LOTE === 0) {
+        pushLog(`[campanha] lote de ${LOTE} — pausa de ${PAUSA_LOTE / 1000}s.`)
+        await sleep(PAUSA_LOTE)
+      } else {
+        await sleep(rand(DELAY_MIN, DELAY_MAX))
+      }
+    } catch (e) {
+      pushLog(`[campanha] erro no loop: ${e.message}`)
+      await sleep(60000)
+    }
+  }
+}
+
 // O profile do Chromium vive no volume persistente. Se o container morre sem
 // fechar o Chromium (deploy/crash), sobra um SingletonLock no profile e o próximo
 // container recusa o launch ("profile in use on another computer") → crash loop.
@@ -291,6 +408,10 @@ client.initialize().catch((e) => {
   pushLog(`Erro ao inicializar o WhatsApp: ${e?.message}`)
 })
 
+// Retoma campanha persistida (se houver) e liga o worker multi-dia.
+carregarCampanha()
+rodarCampanha()
+
 // ─── Página de QR / status / disparo ──────────────────────────────────────────
 const app = express()
 app.use(express.json())
@@ -311,8 +432,82 @@ app.get('/api/status', (req, res) => {
     claudia: CLAUDIA_ENABLED,
     disparo: state.disparo,
     janela: { inicio: JANELA_INICIO, fim: JANELA_FIM, tz: JANELA_TZ, aberta: janelaAberta() },
+    campanha: campanha
+      ? {
+          total: campanha.total,
+          enviados: campanha.enviados.length,
+          pendentes: campanha.pendentes.length,
+          falhas: campanha.falhas.length,
+          enviadosHoje: campanha.enviadosHoje,
+          capHoje: capHoje(),
+          dia: Math.min(campanha.diaIndice + 1, campanha.plano.length),
+          dias: campanha.plano.length,
+          pausada: campanha.pausada,
+          plano: campanha.plano,
+          concluida: campanha.pendentes.length === 0,
+        }
+      : null,
     log: state.log.slice(-200),
   })
+})
+
+// Programa uma campanha multi-dia (NÃO inicia: nasce PAUSADA pra você revisar
+// a contagem limpa e a rampa, e só então clicar Iniciar).
+app.post('/api/campanha', (req, res) => {
+  if (!autorizado(req)) return res.status(401).json({ erro: 'token inválido' })
+  if (campanha && campanha.pendentes.length && !campanha.pausada)
+    return res.status(409).json({ erro: 'Já existe campanha ativa. Cancele antes de criar outra.' })
+
+  const { mensagem, texto, dias } = req.body || {}
+  if (!mensagem || !mensagem.trim()) return res.status(400).json({ erro: 'Mensagem vazia.' })
+
+  let numeros = String(texto || '')
+    .split(/[\n,;]+/)
+    .map(normalizar)
+    .filter(Boolean)
+  const brutos = numeros.length
+  numeros = [...new Set(numeros)] // dedup
+  if (!numeros.length) return res.status(400).json({ erro: 'Nenhum número válido.' })
+
+  const ndias = Math.max(1, Math.min(60, Number(dias) || 15))
+  campanha = {
+    mensagem,
+    total: numeros.length,
+    pendentes: numeros,
+    enviados: [],
+    falhas: [],
+    plano: planoRampa(numeros.length, ndias),
+    enviadosHoje: 0,
+    diaRef: null,
+    diaIndice: 0,
+    pausada: true, // nasce pausada — exige Iniciar explícito
+    criadaEm: new Date().toISOString(),
+  }
+  salvarCampanha()
+  pushLog(`Campanha PROGRAMADA (pausada): ${numeros.length} únicos de ${brutos} colados, ${ndias} dias. Plano: ${campanha.plano.join(', ')}`)
+  res.json({ ok: true, validos: numeros.length, brutos, duplicatas: brutos - numeros.length, dias: ndias, plano: campanha.plano })
+})
+
+app.post('/api/campanha/acao', (req, res) => {
+  if (!autorizado(req)) return res.status(401).json({ erro: 'token inválido' })
+  if (!campanha) return res.status(400).json({ erro: 'Sem campanha.' })
+  const { acao } = req.body || {}
+  if (acao === 'iniciar' || acao === 'retomar') {
+    campanha.pausada = false
+    pushLog(`Campanha ${acao === 'iniciar' ? 'INICIADA' : 'retomada'}.`)
+  } else if (acao === 'pausar') {
+    campanha.pausada = true
+    pushLog('Campanha pausada.')
+  } else if (acao === 'cancelar') {
+    pushLog(`Campanha CANCELADA (${campanha.enviados.length}/${campanha.total} já enviados).`)
+    campanha = null
+    salvarCampanha()
+    return res.json({ ok: true, cancelada: true })
+  } else {
+    return res.status(400).json({ erro: 'Ação inválida.' })
+  }
+  salvarCampanha()
+  res.json({ ok: true, pausada: campanha.pausada })
 })
 
 app.post('/api/enviar', (req, res) => {

@@ -8,6 +8,14 @@ anti-ban. **Sem Cloud API, sem templates** — automação do WhatsApp Web.
 No mesmo número/processo: você dispara a campanha e a Cláudia atende quem responder. O que o
 disparo envia chega como `fromMe` e não dispara auto-reply (sem loop).
 
+Dois modos de envio:
+- **Disparo imediato** — manda a lista agora, com freios (delay 8–25s, lotes de 20, pausa 2min)
+  e janela de horário (9h–18h BRT por padrão).
+- **Campanha multi-dia** — cola a lista uma vez; o bot calcula uma **rampa** (cresce o volume
+  por dia, ideal pra número novo), persiste a fila no volume (`campanha.json`) e envia um pouco
+  por dia dentro da janela, **retomando após reinício** (sem reenviar quem já recebeu). Nasce
+  **pausada**: revise a contagem/rampa e clique Iniciar.
+
 Número: **+55 11 93620-2693** (linha dedicada de atendimento).
 
 > Escopo: **só Q&A** (responder dúvidas). NÃO faz o fluxo de foto→preço→publicar — pra anunciar,
