@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Atendente Cláudia · buybike</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+        background: #0b0b0c; color: #e9e9ea; padding: 28px; line-height: 1.5;
+      }
+      h1 { font-size: 20px; font-weight: 500; margin: 0 0 4px; }
+      .sub { color: #9a9a9e; margin: 0 0 24px; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; max-width: 900px; }
+      .card { background: #141417; border: 1px solid #232327; border-radius: 14px; padding: 18px; }
+      .label { text-transform: uppercase; letter-spacing: .08em; font-size: 14px; color: #8a8a8e; margin: 0 0 12px; }
+      .status { display: flex; align-items: center; gap: 8px; font-weight: 500; margin-bottom: 12px; }
+      .dot { width: 10px; height: 10px; border-radius: 50%; background: #e0533d; }
+      .dot.on { background: #2ec27e; }
+      img.qr { width: 232px; height: 232px; border-radius: 10px; background: #fff; padding: 8px; }
+      .stat { display: flex; gap: 24px; margin-top: 8px; }
+      .stat b { font-size: 22px; font-weight: 500; display: block; }
+      .stat span { color: #8a8a8e; font-size: 14px; }
+      pre.log {
+        background: #0e0e10; border: 1px solid #232327; border-radius: 10px; padding: 12px;
+        max-width: 900px; margin-top: 16px; max-height: 320px; overflow: auto;
+        font-size: 13px; color: #b9b9bd; white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>🤖 Atendente Cláudia · buybike</h1>
+    <p class="sub">Responde dúvidas automaticamente no WhatsApp (web.whatsapp.com) com a IA da Cláudia.</p>
+
+    <div class="grid">
+      <div class="card">
+        <p class="label">Conexão</p>
+        <div class="status"><span class="dot" id="dot"></span><span id="statusText">Carregando…</span></div>
+        <div id="qrBox"></div>
+      </div>
+      <div class="card">
+        <p class="label">Atendimento</p>
+        <div class="stat">
+          <div><b id="atendidos">0</b><span>respondidos</span></div>
+          <div><b id="suprimidos">0</b><span>suprimidos (bot)</span></div>
+        </div>
+        <p class="sub" id="claudiaState" style="margin-top:16px"></p>
+      </div>
+    </div>
+
+    <pre class="log" id="log"></pre>
+
+    <script>
+      const token = new URLSearchParams(location.search).get('token') || ''
+      const q = token ? '?token=' + encodeURIComponent(token) : ''
+      async function tick() {
+        try {
+          const r = await fetch('/api/status' + q)
+          if (!r.ok) { document.getElementById('statusText').textContent = 'não autorizado'; return }
+          const d = await r.json()
+          document.getElementById('dot').className = 'dot' + (d.ready ? ' on' : '')
+          document.getElementById('statusText').textContent = d.ready
+            ? ('Conectado como ' + d.me) : 'Aguardando conexão — escaneie o QR'
+          const qrBox = document.getElementById('qrBox')
+          qrBox.innerHTML = (!d.ready && d.qr) ? ('<img class="qr" src="' + d.qr + '" alt="QR" />') : ''
+          document.getElementById('atendidos').textContent = d.atendidos
+          document.getElementById('suprimidos').textContent = d.suprimidos
+          document.getElementById('claudiaState').textContent =
+            d.claudia ? 'Cláudia ATIVA — respondendo automaticamente.' : 'Cláudia DESLIGADA (CLAUDIA_ENABLED=false).'
+          document.getElementById('log').textContent = (d.log || []).join('\n')
+        } catch (e) {}
+      }
+      tick(); setInterval(tick, 2500)
+    </script>
+  </body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "name": "wa-atendente",
+  "version": "1.0.0",
+  "description": "Atendente Cláudia (Q&A) no WhatsApp via web.whatsapp.com — buybike",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "express": "^4.19.2",
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.26.0"
+  }
+}
