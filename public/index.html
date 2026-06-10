@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Atendente Cláudia · buybike</title>
+    <title>Atendente + Disparo Cláudia · buybike</title>
     <style>
       :root { color-scheme: dark; }
       * { box-sizing: border-box; }
@@ -15,6 +15,7 @@
       .sub { color: #9a9a9e; margin: 0 0 24px; }
       .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; max-width: 900px; }
       .card { background: #141417; border: 1px solid #232327; border-radius: 14px; padding: 18px; }
+      .card.full { max-width: 900px; margin-top: 16px; }
       .label { text-transform: uppercase; letter-spacing: .08em; font-size: 14px; color: #8a8a8e; margin: 0 0 12px; }
       .status { display: flex; align-items: center; gap: 8px; font-weight: 500; margin-bottom: 12px; }
       .dot { width: 10px; height: 10px; border-radius: 50%; background: #e0533d; }
@@ -23,16 +24,40 @@
       .stat { display: flex; gap: 24px; margin-top: 8px; }
       .stat b { font-size: 22px; font-weight: 500; display: block; }
       .stat span { color: #8a8a8e; font-size: 14px; }
+      textarea, input[type=text] {
+        width: 100%; background: #0e0e10; border: 1px solid #232327; border-radius: 10px;
+        color: #e9e9ea; padding: 12px; font: inherit; font-size: 14px; resize: vertical;
+      }
+      textarea:focus, input:focus { outline: none; border-color: #3a3a40; }
+      .field { margin-bottom: 12px; }
+      .hint { color: #8a8a8e; font-size: 14px; margin: 0 0 6px; }
+      .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
+      button {
+        background: #e9e9ea; color: #111; border: 0; border-radius: 10px; padding: 10px 16px;
+        font: inherit; font-weight: 500; cursor: pointer;
+      }
+      button.ghost { background: transparent; color: #e9e9ea; border: 1px solid #2a2a30; }
+      button:disabled { opacity: .5; cursor: not-allowed; }
+      label.check { display: flex; align-items: center; gap: 8px; color: #c9c9ce; font-size: 14px; }
+      .warn {
+        margin-top: 12px; padding: 10px 12px; border-radius: 10px; font-size: 14px;
+        background: #1a1407; border: 1px solid #3a2e0e; color: #d8c08a;
+      }
+      .prog { margin-top: 10px; font-size: 14px; color: #c9c9ce; }
+      .prog b { color: #e9e9ea; font-weight: 500; }
       pre.log {
         background: #0e0e10; border: 1px solid #232327; border-radius: 10px; padding: 12px;
         max-width: 900px; margin-top: 16px; max-height: 320px; overflow: auto;
         font-size: 13px; color: #b9b9bd; white-space: pre-wrap;
       }
+      .msg { font-size: 14px; margin-top: 8px; min-height: 18px; }
+      .msg.err { color: #e0815d; }
+      .msg.ok { color: #6fcf97; }
     </style>
   </head>
   <body>
-    <h1>🤖 Atendente Cláudia · buybike</h1>
-    <p class="sub">Responde dúvidas automaticamente no WhatsApp (web.whatsapp.com) com a IA da Cláudia.</p>
+    <h1>🤖 Atendente + Disparo · buybike</h1>
+    <p class="sub">Cláudia responde dúvidas automaticamente e dispara mensagens pra uma lista (WhatsApp Web).</p>
 
     <div class="grid">
       <div class="card">
@@ -50,11 +75,33 @@
       </div>
     </div>
 
+    <div class="card full">
+      <p class="label">Disparo</p>
+      <div class="field">
+        <p class="hint">Mensagem</p>
+        <textarea id="msg" rows="4" placeholder="Escreva a mensagem do disparo…"></textarea>
+      </div>
+      <div class="field">
+        <p class="hint">Números (um por linha, ou separados por vírgula). Com ou sem DDI — o 55 é assumido se faltar.</p>
+        <textarea id="nums" rows="5" placeholder="11999998888&#10;5511977777030"></textarea>
+      </div>
+      <label class="check"><input type="checkbox" id="dry" checked /> Dry-run (simula, não envia)</label>
+      <div class="warn">⚠️ Dispare só para contatos que aceitaram receber (opt-in). Comece sempre pelo <b>Testar</b> e pelo <b>dry-run</b> antes de soltar pra lista.</div>
+      <div class="row" style="margin-top:14px">
+        <button class="ghost" id="btnTeste">Testar p/ número padrão</button>
+        <button id="btnDisparar">Disparar para a lista</button>
+      </div>
+      <div class="msg" id="msgDisparo"></div>
+      <div class="prog" id="prog"></div>
+    </div>
+
     <pre class="log" id="log"></pre>
 
     <script>
       const token = new URLSearchParams(location.search).get('token') || ''
       const q = token ? '?token=' + encodeURIComponent(token) : ''
+      let enviando = false
+
       async function tick() {
         try {
           const r = await fetch('/api/status' + q)
@@ -63,15 +110,51 @@
           document.getElementById('dot').className = 'dot' + (d.ready ? ' on' : '')
           document.getElementById('statusText').textContent = d.ready
             ? ('Conectado como ' + d.me) : 'Aguardando conexão — escaneie o QR'
-          const qrBox = document.getElementById('qrBox')
-          qrBox.innerHTML = (!d.ready && d.qr) ? ('<img class="qr" src="' + d.qr + '" alt="QR" />') : ''
+          document.getElementById('qrBox').innerHTML = (!d.ready && d.qr) ? ('<img class="qr" src="' + d.qr + '" alt="QR" />') : ''
           document.getElementById('atendidos').textContent = d.atendidos
           document.getElementById('suprimidos').textContent = d.suprimidos
           document.getElementById('claudiaState').textContent =
             d.claudia ? 'Cláudia ATIVA — respondendo automaticamente.' : 'Cláudia DESLIGADA (CLAUDIA_ENABLED=false).'
           document.getElementById('log').textContent = (d.log || []).join('\n')
+
+          const dp = d.disparo || { enviando: false, progresso: {} }
+          enviando = dp.enviando
+          const p = dp.progresso || {}
+          document.getElementById('prog').innerHTML = (p.total)
+            ? ('<b>' + (p.feitos || 0) + '/' + p.total + '</b> processados · ✓ ' + (p.ok || 0) + ' · ✗ ' + (p.falha || 0) + (dp.enviando ? ' · (enviando…)' : ' · (concluído)'))
+            : ''
+          document.getElementById('btnDisparar').disabled = enviando || !d.ready
+          document.getElementById('btnTeste').disabled = enviando || !d.ready
         } catch (e) {}
       }
+
+      async function enviar({ soTeste }) {
+        const mensagem = document.getElementById('msg').value.trim()
+        const texto = document.getElementById('nums').value
+        const dryRun = document.getElementById('dry').checked
+        const box = document.getElementById('msgDisparo')
+        box.className = 'msg'; box.textContent = ''
+        if (!mensagem) { box.className = 'msg err'; box.textContent = 'Escreva a mensagem primeiro.'; return }
+        try {
+          const r = await fetch('/api/enviar' + q, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mensagem, texto, dryRun, soTeste }),
+          })
+          const d = await r.json()
+          if (!r.ok) { box.className = 'msg err'; box.textContent = d.erro || 'Erro.'; return }
+          box.className = 'msg ok'
+          box.textContent = (dryRun ? '[DRY-RUN] ' : '') + (soTeste ? 'Teste iniciado.' : ('Disparo iniciado para ' + d.total + ' número(s).'))
+        } catch (e) { box.className = 'msg err'; box.textContent = 'Falha de rede.' }
+      }
+
+      document.getElementById('btnTeste').onclick = () => enviar({ soTeste: true })
+      document.getElementById('btnDisparar').onclick = () => {
+        if (!document.getElementById('dry').checked &&
+            !confirm('Disparar DE VERDADE para a lista? (dry-run desmarcado)')) return
+        enviar({ soTeste: false })
+      }
+
       tick(); setInterval(tick, 2500)
     </script>
   </body>

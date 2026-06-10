@@ -1,8 +1,12 @@
 # buybike-wpp-QandA · Atendente Cláudia
 
-Atendente automática da Buybike no **WhatsApp** via `web.whatsapp.com` (whatsapp-web.js).
-Responde dúvidas dos usuários com a IA da **Cláudia** (mesma persona/base de conhecimento do
-atendente oficial do app). **Sem Cloud API, sem templates** — automação reativa do WhatsApp Web.
+Atendente automática **+ disparo em massa** da Buybike no **WhatsApp** via `web.whatsapp.com`
+(whatsapp-web.js). Responde dúvidas dos usuários com a IA da **Cláudia** (mesma persona/base de
+conhecimento do atendente oficial do app) **e** dispara mensagens pra uma lista, com freios
+anti-ban. **Sem Cloud API, sem templates** — automação do WhatsApp Web.
+
+No mesmo número/processo: você dispara a campanha e a Cláudia atende quem responder. O que o
+disparo envia chega como `fromMe` e não dispara auto-reply (sem loop).
 
 Número: **+55 11 93620-2693** (linha dedicada de atendimento).
 
@@ -62,7 +66,11 @@ New → Web Service → conecte o repo → runtime **Docker**. Adicione um **Dis
 | `ANTHROPIC_API_KEY` | sim (real) | — | Chave da Anthropic (sem ela = modo mock) |
 | `ADMIN_TOKEN` | recomendada | vazio | Protege `/` e `/api/status` |
 | `CLAUDIA_ENABLED` | não | `true` | Kill-switch das respostas |
-| `COOLDOWN_MS` | não | `15000` | Anti-flood por contato (ms) |
+| `COOLDOWN_MS` | não | `15000` | Anti-flood do atendente, por contato (ms) |
+| `NUMERO_TESTE` | não | `5511977777030` | Número do botão "Testar" do disparo |
+| `DELAY_MIN` / `DELAY_MAX` | não | `8000` / `25000` | Delay aleatório entre envios do disparo (ms) |
+| `LOTE` | não | `20` | Mensagens por lote no disparo |
+| `PAUSA_LOTE` | não | `120000` | Pausa entre lotes do disparo (ms) |
 | `WWEB_AUTH` | prod | `./.wwebjs_auth` | Pasta da sessão (volume no Railway) |
 | `PORT` | não | `3838` | Porta HTTP (PaaS injeta) |
 | `PUPPETEER_EXECUTABLE_PATH` | docker | — | Chromium (Docker: `/usr/bin/chromium`) |
