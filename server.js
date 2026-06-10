@@ -318,6 +318,14 @@ function carregarCampanha() {
   try {
     if (existsSync(CAMPANHA_FILE)) {
       campanha = JSON.parse(readFileSync(CAMPANHA_FILE, 'utf8'))
+      // Se ainda não enviou nada, a rampa não começou — zera a contagem de dias pra
+      // o dia 1 (teto 35) acontecer no 1º dia que de fato enviar, não num começo à noite.
+      if (campanha.enviados.length === 0) {
+        campanha.diaRef = null
+        campanha.diaIndice = 0
+        campanha.enviadosHoje = 0
+        salvarCampanha()
+      }
       pushLog(`Campanha carregada do volume: ${campanha.enviados.length}/${campanha.total} enviados, ${campanha.pendentes.length} pendentes, ${campanha.pausada ? 'PAUSADA' : 'ativa'}.`)
     }
   } catch (e) {
@@ -340,8 +348,10 @@ async function rodarCampanha() {
     try {
       if (!campanha || campanha.pausada || !campanha.pendentes.length) { await sleep(30000); continue }
       if (!state.ready) { await sleep(30000); continue }
+      if (!janelaAberta()) { await sleep(60000); continue }
 
-      // Virou o dia? avança o índice do plano e zera o teto diário.
+      // O dia só vira com a janela ABERTA (= dia de envio real): começar fora da
+      // janela (ex.: à noite) NÃO queima um dia da rampa. Avança o índice e zera o teto.
       const hoje = dataLocal()
       if (campanha.diaRef !== hoje) {
         if (campanha.diaRef) campanha.diaIndice++
@@ -351,7 +361,6 @@ async function rodarCampanha() {
         pushLog(`Campanha: dia ${Math.min(campanha.diaIndice + 1, campanha.plano.length)}/${campanha.plano.length} (${hoje}), teto de hoje: ${capHoje()}.`)
       }
 
-      if (!janelaAberta()) { await sleep(60000); continue }
       if (campanha.enviadosHoje >= capHoje()) { await sleep(60000); continue } // teto do dia batido
       if (state.disparo.enviando) { await sleep(5000); continue } // cede pro disparo manual
 
