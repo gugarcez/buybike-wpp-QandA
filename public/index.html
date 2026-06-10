@@ -87,6 +87,7 @@
       </div>
       <label class="check"><input type="checkbox" id="dry" checked /> Dry-run (simula, não envia)</label>
       <div class="warn">⚠️ Dispare só para contatos que aceitaram receber (opt-in). Comece sempre pelo <b>Testar</b> e pelo <b>dry-run</b> antes de soltar pra lista.</div>
+      <p class="hint" id="janelaInfo" style="margin-top:10px"></p>
       <div class="row" style="margin-top:14px">
         <button class="ghost" id="btnTeste">Testar p/ número padrão</button>
         <button id="btnDisparar">Disparar para a lista</button>
@@ -117,11 +118,18 @@
             d.claudia ? 'Cláudia ATIVA — respondendo automaticamente.' : 'Cláudia DESLIGADA (CLAUDIA_ENABLED=false).'
           document.getElementById('log').textContent = (d.log || []).join('\n')
 
+          const jn = d.janela || {}
+          if (jn.inicio != null) {
+            document.getElementById('janelaInfo').textContent =
+              '🕘 Janela de disparo: ' + jn.inicio + 'h–' + jn.fim + 'h (Brasília) — agora ' +
+              (jn.aberta ? 'ABERTA' : 'FECHADA') + '. Vale só pra lista; teste e dry-run enviam a qualquer hora.'
+          }
           const dp = d.disparo || { enviando: false, progresso: {} }
           enviando = dp.enviando
           const p = dp.progresso || {}
+          let estado = dp.enviando ? (dp.aguardandoJanela ? ' · (pausado — fora da janela)' : ' · (enviando…)') : ' · (concluído)'
           document.getElementById('prog').innerHTML = (p.total)
-            ? ('<b>' + (p.feitos || 0) + '/' + p.total + '</b> processados · ✓ ' + (p.ok || 0) + ' · ✗ ' + (p.falha || 0) + (dp.enviando ? ' · (enviando…)' : ' · (concluído)'))
+            ? ('<b>' + (p.feitos || 0) + '/' + p.total + '</b> processados · ✓ ' + (p.ok || 0) + ' · ✗ ' + (p.falha || 0) + estado)
             : ''
           document.getElementById('btnDisparar').disabled = enviando || !d.ready
           document.getElementById('btnTeste').disabled = enviando || !d.ready

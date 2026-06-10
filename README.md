@@ -71,6 +71,8 @@ New → Web Service → conecte o repo → runtime **Docker**. Adicione um **Dis
 | `DELAY_MIN` / `DELAY_MAX` | não | `8000` / `25000` | Delay aleatório entre envios do disparo (ms) |
 | `LOTE` | não | `20` | Mensagens por lote no disparo |
 | `PAUSA_LOTE` | não | `120000` | Pausa entre lotes do disparo (ms) |
+| `JANELA_INICIO` / `JANELA_FIM` | não | `9` / `18` | Janela horária do disparo de lista (hora local) |
+| `JANELA_TZ` | não | `America/Sao_Paulo` | Timezone da janela |
 | `WWEB_AUTH` | prod | `./.wwebjs_auth` | Pasta da sessão (volume no Railway) |
 | `PORT` | não | `3838` | Porta HTTP (PaaS injeta) |
 | `PUPPETEER_EXECUTABLE_PATH` | docker | — | Chromium (Docker: `/usr/bin/chromium`) |

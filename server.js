@@ -34,6 +34,12 @@ const DELAY_MAX = Number(process.env.DELAY_MAX || 25000) // 25s máx entre envio
 const LOTE = Number(process.env.LOTE || 20) // msgs por lote
 const PAUSA_LOTE = Number(process.env.PAUSA_LOTE || 120000) // 2min entre lotes
 
+// Janela de horário do disparo de LISTA (teste/dry-run ignoram). Fora dela o
+// disparo pausa e retoma sozinho quando reabre. Padrão: 9h–18h de Brasília.
+const JANELA_INICIO = Number(process.env.JANELA_INICIO || 9)
+const JANELA_FIM = Number(process.env.JANELA_FIM || 18)
+const JANELA_TZ = process.env.JANELA_TZ || 'America/Sao_Paulo'
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min
 
@@ -66,7 +72,7 @@ const state = {
   log: [],
   atendidos: 0, // quantas respostas a Cláudia mandou
   suprimidos: 0, // quantas vezes suprimiu (menu de bot)
-  disparo: { enviando: false, progresso: { total: 0, feitos: 0, ok: 0, falha: 0 } },
+  disparo: { enviando: false, aguardandoJanela: false, progresso: { total: 0, feitos: 0, ok: 0, falha: 0 } },
 }
 
 function pushLog(msg) {
@@ -175,15 +181,52 @@ client.on('message', async (msg) => {
   }
 })
 
+// ─── Janela de horário (BRT) ───────────────────────────────────────────────────
+// Hora local na timezone configurada, robusta mesmo com o servidor em UTC (Railway).
+function horaLocal() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: JANELA_TZ,
+    hourCycle: 'h23',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(new Date())
+  const h = Number(parts.find((p) => p.type === 'hour').value)
+  const m = Number(parts.find((p) => p.type === 'minute').value)
+  return h + m / 60
+}
+function janelaAberta() {
+  const h = horaLocal()
+  return h >= JANELA_INICIO && h < JANELA_FIM
+}
+// Bloqueia até a janela reabrir, checando a cada minuto.
+async function aguardarJanela() {
+  let avisou = false
+  while (!janelaAberta()) {
+    if (!avisou) {
+      pushLog(`Fora da janela (${JANELA_INICIO}h–${JANELA_FIM}h ${JANELA_TZ}). Disparo pausado até reabrir…`)
+      state.disparo.aguardandoJanela = true
+      avisou = true
+    }
+    await sleep(60000)
+  }
+  if (avisou) {
+    pushLog('Janela reaberta — retomando disparo.')
+    state.disparo.aguardandoJanela = false
+  }
+}
+
 // ─── Disparo em massa (mesmos freios anti-ban do whatsapp-disparo) ─────────────
 // Convive com o atendente: o que disparamos chega como fromMe e não dispara
 // auto-reply; quem RESPONDER ao disparo cai no fluxo da Cláudia normalmente.
-async function disparar({ numeros, mensagem, dryRun }) {
+async function disparar({ numeros, mensagem, dryRun, respeitarJanela }) {
   state.disparo.enviando = true
+  state.disparo.aguardandoJanela = false
   state.disparo.progresso = { total: numeros.length, feitos: 0, ok: 0, falha: 0 }
-  pushLog(`${dryRun ? '[DRY-RUN] ' : ''}Disparo iniciado para ${numeros.length} número(s).`)
+  pushLog(`${dryRun ? '[DRY-RUN] ' : ''}Disparo iniciado para ${numeros.length} número(s).${respeitarJanela ? ` Janela ${JANELA_INICIO}h–${JANELA_FIM}h ${JANELA_TZ}.` : ''}`)
 
   for (let i = 0; i < numeros.length; i++) {
+    // Respeita a janela de horário (lista real); pausa e retoma sozinho.
+    if (respeitarJanela) await aguardarJanela()
     const n = numeros[i]
     try {
       if (dryRun) {
@@ -267,6 +310,7 @@ app.get('/api/status', (req, res) => {
     suprimidos: state.suprimidos,
     claudia: CLAUDIA_ENABLED,
     disparo: state.disparo,
+    janela: { inicio: JANELA_INICIO, fim: JANELA_FIM, tz: JANELA_TZ, aberta: janelaAberta() },
     log: state.log.slice(-200),
   })
 })
@@ -291,9 +335,12 @@ app.post('/api/enviar', (req, res) => {
   }
   if (!numeros.length) return res.status(400).json({ erro: 'Nenhum número válido.' })
 
-  disparar({ numeros, mensagem, dryRun: !!dryRun }).catch((e) => {
+  // Janela de horário só vale pra disparo REAL de lista; teste e dry-run ignoram.
+  const respeitarJanela = !dryRun && !soTeste
+  disparar({ numeros, mensagem, dryRun: !!dryRun, respeitarJanela }).catch((e) => {
     pushLog(`Erro fatal no disparo: ${e.message}`)
     state.disparo.enviando = false // libera mesmo se algo estourar
+    state.disparo.aguardandoJanela = false
   })
   res.json({ iniciado: true, total: numeros.length })
 })
