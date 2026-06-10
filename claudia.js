@@ -62,6 +62,18 @@ REGRAS:
 - Se a pessoa demonstrar que quer ANUNCIAR, diga que é só mandar a foto da bike aqui no ${canal}.`
 }
 
+// A persona só varia por `canal` (2 valores fixos) — monta uma vez por canal em
+// vez de reinterpolar o ~2KB a cada mensagem.
+const _systemCache = new Map()
+function systemPara(canal = 'WhatsApp') {
+  let s = _systemCache.get(canal)
+  if (!s) {
+    s = buildSystem(canal)
+    _systemCache.set(canal, s)
+  }
+  return s
+}
+
 export const RESPOSTA_MOCK =
   'Oi! Aqui é a Cláudia, da Buybike 👋 Anunciar sua bike é 100% grátis: é só me mandar uma foto da bicicleta aqui que eu identifico o modelo, sugiro o preço e publico no site. Ou dá uma olhada no site: buybike.com.br 🌐'
 
@@ -110,7 +122,7 @@ export async function responderComoClaudia({ pergunta, nome, canal = 'WhatsApp' 
       model: CLAUDE_HAIKU,
       max_tokens: 350,
       temperature: 0.3,
-      system: buildSystem(canal),
+      system: systemPara(canal),
       messages: [{ role: 'user', content: contexto }],
     })
     const out = response.content.find((c) => c.type === 'text')?.text?.trim()

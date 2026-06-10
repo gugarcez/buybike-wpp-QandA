@@ -26,6 +26,17 @@ const CHROME_PATH =
 const COOLDOWN_MS = Number(process.env.COOLDOWN_MS || 15000)
 const ultimaResposta = new Map() // chatId → timestamp
 
+// Registra o envio e poda entradas mais velhas que o cooldown — num processo
+// 24/7 a Map cresceria sem limite (1 entrada por contato único pra sempre).
+function registrarResposta(from, ts) {
+  ultimaResposta.set(from, ts)
+  if (ultimaResposta.size > 1000) {
+    for (const [k, t] of ultimaResposta) {
+      if (ts - t > COOLDOWN_MS) ultimaResposta.delete(k)
+    }
+  }
+}
+
 // ─── Estado em memória (pra página de status) ──────────────────────────────────
 const state = {
   ready: false,
@@ -87,7 +98,7 @@ client.on('message', async (msg) => {
     if (msg.fromMe) return
     const from = msg.from || ''
     if (from.endsWith('@g.us')) return // grupo
-    if (from === 'status@broadcast' || from.endsWith('@broadcast')) return
+    if (from.endsWith('@broadcast')) return // status@broadcast e listas de transmissão
     if (from.endsWith('@newsletter')) return
     if (!CLAUDIA_ENABLED) return
 
@@ -99,29 +110,29 @@ client.on('message', async (msg) => {
       return
     }
 
-    // Mídia/foto: fluxo de publicar está fora de escopo → convite único pro site.
-    if (msg.hasMedia || (msg.type && msg.type !== 'chat')) {
-      ultimaResposta.set(from, agora)
-      await msg.reply(CONVITE_FOTO)
-      state.atendidos++
-      pushLog(`📸 ${from} mandou mídia → convite pro /anunciar`)
+    // Não-texto: imagem/vídeo/documento → convite pro /anunciar (publicar está fora
+    // de escopo). Sticker, áudio, localização, contato etc. são ignorados (não tem
+    // o que responter em Q&A de texto e evita o convite de foto sair errado).
+    if (msg.type !== 'chat') {
+      if (msg.type === 'image' || msg.type === 'video' || msg.type === 'document') {
+        registrarResposta(from, agora)
+        await msg.reply(CONVITE_FOTO)
+        state.atendidos++
+        pushLog(`📸 ${from} mandou ${msg.type} → convite pro /anunciar`)
+      }
       return
     }
 
     const texto = (msg.body || '').trim()
     if (!texto) return
 
-    let nome
-    try {
-      const contact = await msg.getContact()
-      nome = contact?.pushname || contact?.name || undefined
-    } catch {}
-
-    let chat
-    try {
-      chat = await msg.getChat()
-      await chat.sendStateTyping()
-    } catch {}
+    // Contato e chat em paralelo (duas chamadas à ponte do WhatsApp Web) — o nome
+    // é opcional, então toleramos falha em qualquer um dos dois.
+    const [contactRes, chatRes] = await Promise.allSettled([msg.getContact(), msg.getChat()])
+    const contact = contactRes.status === 'fulfilled' ? contactRes.value : null
+    const nome = contact?.pushname || contact?.name || undefined
+    const chat = chatRes.status === 'fulfilled' ? chatRes.value : null
+    try { await chat?.sendStateTyping() } catch {}
 
     const resposta = await responderComoClaudia({ pergunta: texto, nome, canal: 'WhatsApp' })
 
@@ -133,7 +144,7 @@ client.on('message', async (msg) => {
     }
 
     const final = resposta || RESPOSTA_MOCK // null (erro) → welcome padrão
-    ultimaResposta.set(from, agora)
+    registrarResposta(from, agora)
     await msg.reply(final)
     state.atendidos++
     pushLog(`✓ ${from} ${nome ? `(${nome}) ` : ''}→ respondido: "${texto.slice(0, 50)}"`)

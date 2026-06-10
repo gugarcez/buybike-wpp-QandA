@@ -1,4 +1,4 @@
-# buybike-bot-wpp-QandA · Atendente Cláudia
+# buybike-wpp-QandA · Atendente Cláudia
 
 Atendente automática da Buybike no **WhatsApp** via `web.whatsapp.com` (whatsapp-web.js).
 Responde dúvidas dos usuários com a IA da **Cláudia** (mesma persona/base de conhecimento do
@@ -37,7 +37,7 @@ mensagem de outro celular pra testar a resposta.
 
 ## Deploy no Railway
 
-1. **New Project → Deploy from GitHub repo** → `buybike-wpp/buybike-bot-wpp-QandA`.
+1. **New Project → Deploy from GitHub repo** → `gugarcez/buybike-wpp-QandA`.
    O Railway detecta o `Dockerfile` (Chromium já incluso na imagem).
 2. **Variables** (Settings → Variables):
    - `ANTHROPIC_API_KEY` — chave da Anthropic.
