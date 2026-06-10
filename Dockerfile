@@ -22,10 +22,10 @@ RUN npm install --omit=dev
 
 COPY . .
 
-# Sessão do WhatsApp Web — montar um VOLUME persistente aqui no Railway/Render,
-# senão todo redeploy desloga e exige re-scan do QR.
+# Sessão do WhatsApp Web. No Railway, monte um Volume (na UI) em /app/.wwebjs_auth —
+# NÃO usar a instrução docker VOLUME (o builder do Railway rejeita; usa Railway Volumes).
+# Sem o volume montado, todo redeploy desloga e exige re-scan do QR.
 ENV WWEB_AUTH=/app/.wwebjs_auth
-VOLUME ["/app/.wwebjs_auth"]
 
 EXPOSE 3838
 CMD ["node", "server.js"]
