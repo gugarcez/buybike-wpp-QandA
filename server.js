@@ -90,8 +90,8 @@ client.on('disconnected', (reason) => {
 
 // ─── Atendente: responde mensagens recebidas ───────────────────────────────────
 const CONVITE_FOTO =
-  'Recebi sua mídia! 📸 Pra anunciar sua bike é rapidinho e grátis: faça pelo site em ' +
-  'buybike.com.br/anunciar que a IA identifica o modelo e sugere o preço. Qualquer dúvida, é só me chamar aqui.'
+  'Recebi sua mídia! 📸 Aqui eu só tiro dúvidas — pra anunciar sua bike (rapidinho e grátis) é no site: ' +
+  'acesse buybike.com.br que a IA identifica o modelo e sugere o preço. Qualquer dúvida, me chama aqui.'
 
 client.on('message', async (msg) => {
   try {
