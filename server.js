@@ -4,6 +4,7 @@ import qrcodeTerminal from 'qrcode-terminal'
 import pkg from 'whatsapp-web.js'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
+import { readdirSync, rmSync, existsSync } from 'fs'
 
 import { responderComoClaudia, CLAUDIA_SUPPRESS, RESPOSTA_MOCK } from './claudia.js'
 
@@ -153,7 +154,32 @@ client.on('message', async (msg) => {
   }
 })
 
-client.initialize()
+// O profile do Chromium vive no volume persistente. Se o container morre sem
+// fechar o Chromium (deploy/crash), sobra um SingletonLock no profile e o próximo
+// container recusa o launch ("profile in use on another computer") → crash loop.
+// Limpa esses locks órfãos no boot antes de subir o cliente.
+function limparLocksChromium(dir) {
+  try {
+    if (!existsSync(dir)) return
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        limparLocksChromium(full)
+      } else if (/^Singleton(Lock|Cookie|Socket)$/.test(entry.name)) {
+        try {
+          rmSync(full, { force: true })
+          pushLog(`lock órfão do Chromium removido: ${full}`)
+        } catch {}
+      }
+    }
+  } catch {}
+}
+limparLocksChromium(WWEB_AUTH)
+
+client.initialize().catch((e) => {
+  // Não deixa um erro de launch derrubar o processo sem log claro (Railway reinicia).
+  pushLog(`Erro ao inicializar o WhatsApp: ${e?.message}`)
+})
 
 // ─── Página de QR / status ──────────────────────────────────────────────────
 const app = express()
