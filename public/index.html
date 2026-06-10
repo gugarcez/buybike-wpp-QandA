@@ -91,6 +91,7 @@
       <div class="row" style="margin-top:14px">
         <button class="ghost" id="btnTeste">Testar p/ número padrão</button>
         <button id="btnDisparar">Disparar para a lista</button>
+        <button class="ghost" id="btnParar" style="display:none">⏹ Parar disparo</button>
       </div>
       <div class="msg" id="msgDisparo"></div>
       <div class="prog" id="prog"></div>
@@ -157,6 +158,7 @@
             : ''
           document.getElementById('btnDisparar').disabled = enviando || !d.ready
           document.getElementById('btnTeste').disabled = enviando || !d.ready
+          document.getElementById('btnParar').style.display = enviando ? '' : 'none'
 
           // Campanha
           const cs = document.getElementById('campStatus')
@@ -199,6 +201,10 @@
         } catch (e) { box.className = 'msg err'; box.textContent = 'Falha de rede.' }
       }
 
+      document.getElementById('btnParar').onclick = async () => {
+        if (!confirm('Parar o disparo em andamento?')) return
+        try { await fetch('/api/disparo/parar' + q, { method: 'POST' }) } catch (e) {}
+      }
       document.getElementById('btnTeste').onclick = () => enviar({ soTeste: true })
       document.getElementById('btnDisparar').onclick = () => {
         if (!document.getElementById('dry').checked &&

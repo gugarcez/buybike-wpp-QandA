@@ -33,6 +33,9 @@ const DELAY_MIN = Number(process.env.DELAY_MIN || 8000) // 8s mín entre envios
 const DELAY_MAX = Number(process.env.DELAY_MAX || 25000) // 25s máx entre envios
 const LOTE = Number(process.env.LOTE || 20) // msgs por lote
 const PAUSA_LOTE = Number(process.env.PAUSA_LOTE || 120000) // 2min entre lotes
+// Disparo imediato é pra teste/lista pequena. Lista grande DEVE ir pra Campanha
+// (rampa multi-dia) — evita blast de 1000 de uma vez num número novo.
+const MAX_IMEDIATO = Number(process.env.MAX_IMEDIATO || 50)
 
 // Janela de horário do disparo de LISTA (teste/dry-run ignoram). Fora dela o
 // disparo pausa e retoma sozinho quando reabre. Padrão: 9h–18h de Brasília.
@@ -202,10 +205,14 @@ function janelaAberta() {
   const h = horaLocal()
   return h >= JANELA_INICIO && h < JANELA_FIM
 }
-// Bloqueia até a janela reabrir, checando a cada minuto.
+// Flag de cancelamento do disparo manual (setada por /api/disparo/parar).
+let disparoCancelar = false
+
+// Bloqueia até a janela reabrir, checando a cada minuto. Sai cedo se cancelado.
 async function aguardarJanela() {
   let avisou = false
   while (!janelaAberta()) {
+    if (disparoCancelar) return
     if (!avisou) {
       pushLog(`Fora da janela (${JANELA_INICIO}h–${JANELA_FIM}h ${JANELA_TZ}). Disparo pausado até reabrir…`)
       state.disparo.aguardandoJanela = true
@@ -223,14 +230,17 @@ async function aguardarJanela() {
 // Convive com o atendente: o que disparamos chega como fromMe e não dispara
 // auto-reply; quem RESPONDER ao disparo cai no fluxo da Cláudia normalmente.
 async function disparar({ numeros, mensagem, dryRun, respeitarJanela }) {
+  disparoCancelar = false
   state.disparo.enviando = true
   state.disparo.aguardandoJanela = false
   state.disparo.progresso = { total: numeros.length, feitos: 0, ok: 0, falha: 0 }
   pushLog(`${dryRun ? '[DRY-RUN] ' : ''}Disparo iniciado para ${numeros.length} número(s).${respeitarJanela ? ` Janela ${JANELA_INICIO}h–${JANELA_FIM}h ${JANELA_TZ}.` : ''}`)
 
   for (let i = 0; i < numeros.length; i++) {
+    if (disparoCancelar) { pushLog('Disparo CANCELADO.'); break }
     // Respeita a janela de horário (lista real); pausa e retoma sozinho.
     if (respeitarJanela) await aguardarJanela()
+    if (disparoCancelar) { pushLog('Disparo CANCELADO.'); break }
     const n = numeros[i]
     try {
       if (dryRun) {
@@ -264,8 +274,9 @@ async function disparar({ numeros, mensagem, dryRun, respeitarJanela }) {
     }
   }
 
-  pushLog(`Disparo concluído. OK: ${state.disparo.progresso.ok} · Falha: ${state.disparo.progresso.falha}`)
+  pushLog(`Disparo finalizado. OK: ${state.disparo.progresso.ok} · Falha: ${state.disparo.progresso.falha}`)
   state.disparo.enviando = false
+  state.disparo.aguardandoJanela = false
 }
 
 // ─── Campanha multi-dia (fila persistente + teto diário com rampa) ─────────────
@@ -530,6 +541,13 @@ app.post('/api/enviar', (req, res) => {
   }
   if (!numeros.length) return res.status(400).json({ erro: 'Nenhum número válido.' })
 
+  // Trava anti-blast: lista grande em envio REAL → manda usar a Campanha.
+  if (!soTeste && !dryRun && numeros.length > MAX_IMEDIATO) {
+    return res.status(400).json({
+      erro: `Lista grande (${numeros.length}). O disparo imediato é só pra teste/até ${MAX_IMEDIATO} números. Pra essa lista use a Campanha (vários dias), que faz a rampa com segurança.`,
+    })
+  }
+
   // Janela de horário só vale pra disparo REAL de lista; teste e dry-run ignoram.
   const respeitarJanela = !dryRun && !soTeste
   disparar({ numeros, mensagem, dryRun: !!dryRun, respeitarJanela }).catch((e) => {
@@ -538,6 +556,14 @@ app.post('/api/enviar', (req, res) => {
     state.disparo.aguardandoJanela = false
   })
   res.json({ iniciado: true, total: numeros.length })
+})
+
+app.post('/api/disparo/parar', (req, res) => {
+  if (!autorizado(req)) return res.status(401).json({ erro: 'token inválido' })
+  if (!state.disparo.enviando) return res.status(400).json({ erro: 'Nenhum disparo em andamento.' })
+  disparoCancelar = true
+  pushLog('Pedido de PARAR disparo recebido.')
+  res.json({ ok: true })
 })
 
 app.get('/healthz', (_req, res) => res.json({ ok: true, ready: state.ready }))
