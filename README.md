@@ -84,6 +84,30 @@ New → Web Service → conecte o repo → runtime **Docker**. Adicione um **Dis
 | `WWEB_AUTH` | prod | `./.wwebjs_auth` | Pasta da sessão (volume no Railway) |
 | `PORT` | não | `3838` | Porta HTTP (PaaS injeta) |
 | `PUPPETEER_EXECUTABLE_PATH` | docker | — | Chromium (Docker: `/usr/bin/chromium`) |
+| `PROSPECCAO_ENABLED` | não | `false` | Liga a prospecção Hub4 |
+| `PROSPECCAO_DRY_RUN` | não | `true` | Só loga o que faria (não cria anúncio nem manda DM) |
+| `GRUPO_ALVO_REGEX` | não | `hub\s*-?\s*4` | Regex (case-insensitive) casada contra o NOME do grupo |
+| `GRUPO_ALVO_ID` | não | vazio | Override opcional: JID(s) de grupo separados por vírgula |
+| `ADMIN_SECRET` | prospecção | — | Bearer do `/api/admin/hub4-import` (mesmo valor do app) |
+
+## Rodar em mais de um número
+
+Um segundo número = uma **2ª instância independente** deste mesmo bot, com seu **próprio
+volume/sessão** (`WWEB_AUTH` separado) escaneando o QR do 2º número. Nada é específico de
+número no código: o grupo-alvo é identificado pelo **nome** (`GRUPO_ALVO_REGEX`), então a
+mesma config serve pra qualquer número.
+
+1. Crie um **2º serviço no Railway** (outro deploy do mesmo repo).
+2. Dê a ele um **volume próprio** montado em `/app/.wwebjs_auth` (não compartilhe com o 1º) e
+   aponte `WWEB_AUTH=/app/.wwebjs_auth`.
+3. **Escaneie o QR** desse serviço com o 2º número.
+4. Use as **mesmas variáveis** (`ANTHROPIC_API_KEY`, `ADMIN_SECRET`, `GRUPO_ALVO_REGEX`, etc.).
+
+**Caveat (mesmo grupo nos dois números):** a idempotência do lado do app evita anúncio
+duplicado, e o check `already_existed` evita DM dobrada (o 2º número detecta que o anúncio já
+existe e **pula a DM**). Mesmo assim, por garantia, mantenha `PROSPECCAO_ENABLED=true` em
+**apenas um** dos números por grupo compartilhado. Ligue os dois só quando cobrirem **grupos
+diferentes**.
 
 ## Avisos
 

@@ -7,6 +7,7 @@ import { dirname, join } from 'path'
 import { readdirSync, rmSync, existsSync, writeFileSync, readFileSync } from 'fs'
 
 import { responderComoClaudia, CLAUDIA_SUPPRESS, RESPOSTA_MOCK } from './claudia.js'
+import { extrairPost, mensagemReivindicacao } from './prospeccao.js'
 
 const { Client, LocalAuth } = pkg
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -47,6 +48,39 @@ const JANELA_TZ = process.env.JANELA_TZ || 'America/Sao_Paulo'
 const CAMPANHA_FILE = join(WWEB_AUTH, 'campanha.json')
 let campanha = null // objeto da campanha em andamento (ou null)
 
+// ─── Config de prospecção (grupo Hub4 → anúncio pré-montado + DM ao vendedor) ──
+// Por SEGURANÇA tudo nasce DESLIGADO: feature off e dry-run on por default. Quando
+// ligada, identifica o grupo-alvo pelo NOME (regex) — assim funciona em vários
+// grupos Hub4 ("HUB4 - Grupo 1", "Grupo 2"…) e em vários números SEM configurar um
+// JID por grupo. GRUPO_ALVO_ID continua como override explícito (lista de JIDs).
+const GRUPO_ALVO_REGEX_DEFAULT = 'hub\\s*-?\\s*4'
+const GRUPO_ALVO_REGEX_SRC = process.env.GRUPO_ALVO_REGEX || GRUPO_ALVO_REGEX_DEFAULT
+// Regex vinda do env pode ser inválida e estouraria no import — derrubando o
+// processo INTEIRO (inclusive o bot de Q&A). Compila com guarda e cai no default.
+let GRUPO_ALVO_REGEX
+try {
+  GRUPO_ALVO_REGEX = new RegExp(GRUPO_ALVO_REGEX_SRC, 'i')
+} catch (e) {
+  console.warn(`[prospeccao] GRUPO_ALVO_REGEX inválida ("${GRUPO_ALVO_REGEX_SRC}"): ${e.message}. Usando default.`)
+  GRUPO_ALVO_REGEX = new RegExp(GRUPO_ALVO_REGEX_DEFAULT, 'i')
+}
+const GRUPO_ALVO_ID = process.env.GRUPO_ALVO_ID || '' // override opcional: JID(s) separados por vírgula
+const GRUPO_ALVO_IDS = new Set(
+  GRUPO_ALVO_ID.split(',').map((s) => s.trim()).filter(Boolean)
+)
+const PROSPECCAO_ENABLED = process.env.PROSPECCAO_ENABLED === 'true' // default false
+const PROSPECCAO_DRY_RUN = process.env.PROSPECCAO_DRY_RUN !== 'false' // default true
+const BUYBIKE_API_URL = process.env.BUYBIKE_API_URL || 'https://buybike.com.br'
+const ADMIN_SECRET = process.env.ADMIN_SECRET || '' // bearer pro /api/admin/hub4-import
+// Debounce do pareamento: foto(s) + card de texto chegam como msgs separadas, com
+// segundos de diferença. Acumula tudo que chega do grupo e processa quando "esfria".
+const PROSPECCAO_DEBOUNCE_MS = Number(process.env.PROSPECCAO_DEBOUNCE_MS || 30000)
+// Teto de idade do buffer: mesmo com msgs chegando sem parar, um buffer não vive
+// além disso — senão o post A poderia colar com o card do post B (fotos/vendedor
+// trocados). Ao estourar, o buffer atual é flushado e um novo começa.
+const PROSPECCAO_BUFFER_MAX_MS = Number(process.env.PROSPECCAO_BUFFER_MAX_MS || 90000)
+const PROSPECCAO_FILE = join(WWEB_AUTH, 'prospeccao.json')
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min
 
@@ -58,6 +92,13 @@ function normalizar(raw) {
   if (!n) return null
   if (!n.startsWith('55')) n = '55' + n // assume Brasil se não vier DDI
   return n
+}
+
+// Compara dois números normalizados ignorando o 9º dígito (ambiguidade do BR):
+// confere os últimos 8 dígitos, que são iguais com ou sem o 9 na frente.
+function mesmoNumero(a, b) {
+  if (!a || !b) return false
+  return String(a).slice(-8) === String(b).slice(-8)
 }
 
 // Registra o envio e poda entradas mais velhas que o cooldown — num processo
@@ -129,12 +170,21 @@ const CONVITE_FOTO =
 
 client.on('message', async (msg) => {
   try {
-    // Ignora: nada que a gente mandou, grupos, status/broadcast, newsletters/canais.
+    // Ignora: nada que a gente mandou, status/broadcast, newsletters/canais.
     if (msg.fromMe) return
     const from = msg.from || ''
-    if (from.endsWith('@g.us')) return // grupo
     if (from.endsWith('@broadcast')) return // status@broadcast e listas de transmissão
     if (from.endsWith('@newsletter')) return
+
+    // Grupos: por padrão são ignorados. EXCEÇÃO: se a prospecção está ligada e a msg
+    // veio de um grupo-alvo (nome casa GRUPO_ALVO_REGEX OU JID está em GRUPO_ALVO_ID),
+    // ela entra no buffer de pareamento (foto[s] + card) daquele grupo.
+    if (from.endsWith('@g.us')) {
+      if (PROSPECCAO_ENABLED && (await ehGrupoAlvo(msg, from))) {
+        await bufferarMsgGrupo(msg, from)
+      }
+      return // qualquer outro grupo (ou prospecção off) segue ignorado, como hoje
+    }
     if (!CLAUDIA_ENABLED) return
 
     // Anti-flood por contato.
@@ -401,6 +451,381 @@ async function rodarCampanha() {
   }
 }
 
+// ─── Prospecção Hub4 (grupo → anúncio pré-montado + DM ao vendedor) ────────────
+// Estado persistente: fila de leads + dedup + histórico. Salvo no volume, mesmo
+// padrão do CAMPANHA_FILE.
+const prospeccao = {
+  fila: [], // leads aguardando criação de anúncio + DM
+  enviados: [], // { tel, titulo, claimUrl, em } com sucesso
+  falhas: [], // { tel, titulo, erro, em }
+  jaProcessados: [], // chaves `${tel}|${tituloNorm}` já tratadas (dedup)
+}
+// Set em memória pra lookup O(1) do dedup; a lista serializada é a fonte da verdade.
+let jaProcessadosSet = new Set()
+
+function chaveDedup(tel, titulo) {
+  // Normaliza o título (minúsculo, sem espaços extras) pra evitar duplicata por
+  // pequena variação de digitação entre repostagens da mesma bike.
+  const t = String(titulo || '').toLowerCase().replace(/\s+/g, ' ').trim()
+  return `${tel}|${t}`
+}
+
+function salvarProspeccao() {
+  try {
+    prospeccao.jaProcessados = [...jaProcessadosSet]
+    writeFileSync(PROSPECCAO_FILE, JSON.stringify(prospeccao))
+  } catch (e) {
+    pushLog(`erro salvando prospeccao: ${e.message}`)
+  }
+}
+
+function carregarProspeccao() {
+  try {
+    if (existsSync(PROSPECCAO_FILE)) {
+      const dados = JSON.parse(readFileSync(PROSPECCAO_FILE, 'utf8'))
+      prospeccao.fila = dados.fila || []
+      prospeccao.enviados = dados.enviados || []
+      prospeccao.falhas = dados.falhas || []
+      prospeccao.jaProcessados = dados.jaProcessados || []
+      jaProcessadosSet = new Set(prospeccao.jaProcessados)
+      pushLog(`Prospecção carregada do volume: ${prospeccao.fila.length} na fila, ${prospeccao.enviados.length} enviados, ${jaProcessadosSet.size} já processados.`)
+    }
+  } catch (e) {
+    pushLog(`erro carregando prospeccao: ${e.message}`)
+  }
+}
+
+// Cache da decisão "este grupo é alvo?" por JID (grupos são tagarelas: sem cache
+// chamaríamos getChat() a cada msg). jid → boolean. Limpa de boas: o set de grupos
+// de um número é pequeno.
+const grupoAlvoCache = new Map() // jid → boolean
+// Guarda o nome resolvido do grupo (pra repassar ao processamento e logs).
+const grupoNomeCache = new Map() // jid → string
+
+async function ehGrupoAlvo(msg, jid) {
+  if (grupoAlvoCache.has(jid)) return grupoAlvoCache.get(jid)
+  // Override explícito por JID dispensa resolver o chat.
+  if (GRUPO_ALVO_IDS.has(jid)) {
+    grupoAlvoCache.set(jid, true)
+    return true
+  }
+  try {
+    const chat = await msg.getChat()
+    const nome = chat?.name || ''
+    grupoNomeCache.set(jid, nome)
+    const alvo = GRUPO_ALVO_REGEX.test(nome)
+    grupoAlvoCache.set(jid, alvo)
+    if (alvo) {
+      // Aproveita o MESMO chat já buscado pra montar o blocklist de admins do grupo.
+      atualizarAdminsGrupo(chat)
+      pushLog(`[prospeccao] grupo-alvo identificado por nome: "${nome}" (${jid}).`)
+    }
+    return alvo
+  } catch (e) {
+    pushLog(`[prospeccao] erro resolvendo grupo ${jid}: ${e.message}`)
+    return false // na dúvida, não trata como alvo
+  }
+}
+
+// Buffers de pareamento POR GRUPO (jid → { fotosBase64, texto, timer, startedAt }).
+// Dois grupos Hub4 diferentes não podem misturar foto/texto, então cada um debounce
+// sozinho.
+const postBuffers = new Map()
+
+// Heurística de "card de anúncio": texto que tem PREÇO (R$) E uma sequência de
+// telefone (8+ dígitos). Serve de fronteira de commit — um 2º card no mesmo buffer
+// significa anúncio novo (não pode colar com o anterior).
+function pareceCardDeAnuncio(texto) {
+  const t = String(texto || '')
+  if (!/R\$/i.test(t)) return false
+  return /\d[\d\s().-]{6,}\d/.test(t) // 8+ caracteres de telefone-ish com dígitos nas pontas
+}
+
+// Dispara o processamento do buffer atual de um grupo e limpa o estado (timer +
+// entrada), pra nada vazar pro próximo post.
+function flushBuffer(jid) {
+  const buf = postBuffers.get(jid)
+  if (!buf) return
+  if (buf.timer) clearTimeout(buf.timer)
+  postBuffers.delete(jid)
+  if (!buf.fotosBase64.length && !buf.texto) return
+  const grupoNome = grupoNomeCache.get(jid) || null
+  const post = { fotosBase64: buf.fotosBase64, texto: buf.texto, grupoJid: jid, grupoNome }
+  processarPostGrupo(post).catch((e) => pushLog(`[prospeccao] erro processando post: ${e.message}`))
+}
+
+async function bufferarMsgGrupo(msg, jid) {
+  try {
+    if (msg.type !== 'image' && msg.type !== 'chat') {
+      return // outros tipos (sticker, áudio, etc.) não fazem parte do post
+    }
+
+    const agora = Date.now()
+    let buf = postBuffers.get(jid)
+
+    // Teto de idade: se o buffer já existe e está velho demais, flusha ANTES de
+    // misturar — evita estender pra sempre e colar dois posts distintos.
+    if (buf && agora - buf.startedAt >= PROSPECCAO_BUFFER_MAX_MS) {
+      pushLog(`[prospeccao] buffer do grupo ${jid} estourou idade máxima — flush antes de iniciar novo.`)
+      flushBuffer(jid)
+      buf = null
+    }
+
+    // Fronteira por card: se um card de anúncio chega e o buffer JÁ tem um card,
+    // são dois anúncios empilhados — flusha o atual e começa um novo com esta msg.
+    const corpo = msg.type === 'chat' ? (msg.body || '').trim() : ''
+    if (
+      msg.type === 'chat' &&
+      buf &&
+      pareceCardDeAnuncio(corpo) &&
+      pareceCardDeAnuncio(buf.texto)
+    ) {
+      pushLog(`[prospeccao] 2º card de anúncio no grupo ${jid} — flush do anterior e novo buffer.`)
+      flushBuffer(jid)
+      buf = null
+    }
+
+    if (!buf) {
+      buf = { fotosBase64: [], texto: '', timer: null, startedAt: agora }
+      postBuffers.set(jid, buf)
+    }
+
+    if (msg.type === 'image') {
+      const media = await msg.downloadMedia()
+      // media.data é base64 cru (sem prefixo data:...;base64,) — passa direto pra API.
+      if (media?.data) buf.fotosBase64.push(media.data)
+      pushLog(`[prospeccao] foto recebida do grupo ${jid} (${buf.fotosBase64.length} no buffer).`)
+    } else if (corpo) {
+      buf.texto = corpo // card de texto mais recente vence
+      pushLog(`[prospeccao] card de texto recebido (${jid}): "${corpo.slice(0, 50)}"`)
+    }
+
+    // Debounce: reinicia o timer a cada msg pra agrupar foto(s) + card que chegam juntos.
+    if (buf.timer) clearTimeout(buf.timer)
+    buf.timer = setTimeout(() => flushBuffer(jid), PROSPECCAO_DEBOUNCE_MS)
+  } catch (e) {
+    pushLog(`[prospeccao] erro no buffer: ${e.message}`)
+  }
+}
+
+// Blocklist de admins POR GRUPO (jid → Set de telefones normalizados). Donos da
+// Hub4 NUNCA podem receber DM, então o store é por grupo (com 2 grupos, um global
+// sobrescreveria o outro e checaria a lista errada). Resolve os participantes de
+// fato — se chat.participants vier vazio, NÃO sobrescreve um set bom já conhecido.
+const adminsPorGrupo = new Map() // jid → Set<tel>
+async function atualizarAdminsGrupo(chat) {
+  try {
+    const jid = chat?.id?._serialized
+    if (!jid) return
+    // Garante que os participantes estão carregados (às vezes vêm vazios do cache).
+    let participantes = chat.participants || []
+    if (!participantes.length && typeof chat.fetchParticipants === 'function') {
+      try {
+        await chat.fetchParticipants()
+        participantes = chat.participants || []
+      } catch {}
+    }
+    // Ainda vazio: NÃO sobrescreve um set bom anterior (evita "esvaziar" a blocklist
+    // e deixar um admin passar). O grupo fica UNRESOLVED até a próxima tentativa.
+    if (!participantes.length) {
+      if (!adminsPorGrupo.has(jid)) {
+        pushLog(`[prospeccao] participantes do grupo ${jid} não carregaram — admins não resolvidos.`)
+      }
+      return
+    }
+    const novos = new Set()
+    for (const p of participantes) {
+      if (p.isAdmin || p.isSuperAdmin) {
+        const tel = normalizar(p.id?._serialized?.replace(/@.*/, ''))
+        if (tel) novos.add(tel)
+      }
+    }
+    adminsPorGrupo.set(jid, novos)
+  } catch (e) {
+    pushLog(`[prospeccao] erro lendo admins do grupo: ${e.message}`)
+  }
+}
+
+// Processa um post pareado: extrai os campos, aplica os gates de segurança e (se
+// passar) enfileira o lead pro worker — ou, em dry-run, só loga o que faria.
+async function processarPostGrupo(post) {
+  if (!post.texto) {
+    pushLog('[prospeccao] post sem card de texto — ignorado.')
+    return
+  }
+
+  const dados = await extrairPost({ texto: post.texto })
+  const { ehAnuncioBike, telefone, titulo } = dados
+  if (!ehAnuncioBike) {
+    pushLog(`[prospeccao] não é anúncio de bike — ignorado: "${post.texto.slice(0, 40)}"`)
+    return
+  }
+  if (!telefone) {
+    pushLog(`[prospeccao] anúncio "${titulo}" sem telefone de contato — ignorado.`)
+    return
+  }
+
+  const tel = normalizar(telefone)
+  if (!tel) {
+    pushLog(`[prospeccao] telefone inválido ("${telefone}") — ignorado.`)
+    return
+  }
+
+  // Atualiza o blocklist de admins DESTE grupo ANTES de checar (donos da Hub4 não
+  // são prospects). Rebusca o chat pra pegar admins atuais.
+  if (post.grupoJid) {
+    try { await atualizarAdminsGrupo(await client.getChatById(post.grupoJid)) } catch {}
+  }
+  // FAIL-CLOSED: se não conseguimos resolver os admins DESTE grupo (set ausente ou
+  // vazio), pulamos por segurança — jamais arriscar uma DM pra um admin Hub4.
+  const adminsDoGrupo = post.grupoJid ? adminsPorGrupo.get(post.grupoJid) : null
+  if (!adminsDoGrupo || adminsDoGrupo.size === 0) {
+    pushLog(`[prospecção] admins do grupo não resolvidos, pulando por segurança: ${tel}`)
+    return
+  }
+  if (adminsDoGrupo.has(tel)) {
+    pushLog(`[prospeccao] contato ${tel} é admin do grupo (Hub4) — pulando.`)
+    return
+  }
+  // Guard do próprio número do bot: compara os últimos 8 dígitos de cada número
+  // normalizado, pra ser robusto à ambiguidade do 9º dígito no BR (nunca DM a si).
+  const meuNumero = normalizar(state.me)
+  if (meuNumero && mesmoNumero(meuNumero, tel)) {
+    pushLog('[prospeccao] contato é o próprio número do bot — pulando.')
+    return
+  }
+  const chave = chaveDedup(tel, titulo)
+  if (jaProcessadosSet.has(chave)) {
+    pushLog(`[prospeccao] "${titulo}" de ${tel} já processado — pulando (dedup).`)
+    return
+  }
+
+  // Payload da API de criação (ver contrato em /api/admin/hub4-import).
+  const payload = {
+    titulo: titulo || '',
+    preco: dados.preco ?? null,
+    categoria: dados.categoria || 'estrada',
+    marca: dados.marca || null,
+    modelo: dados.modelo || null,
+    ano: dados.ano ?? null,
+    tamanho: dados.tamanho || null,
+    condicao: dados.condicao || null,
+    descricao: dados.descricao || '',
+    transmissao_grupo: dados.transmissao_grupo || null,
+    cidade: dados.cidade || '',
+    original_phone: tel,
+    original_vendedor: dados.vendedorNome || null,
+    fotosBase64: post.fotosBase64 || [],
+  }
+
+  if (PROSPECCAO_DRY_RUN) {
+    const dm = mensagemReivindicacao({
+      vendedorNome: dados.vendedorNome,
+      titulo,
+      preco: dados.preco,
+      claimUrl: `${BUYBIKE_API_URL}/claim/<uuid-dry-run>`,
+    })
+    pushLog(`[DRY-RUN] criaria anúncio (${payload.fotosBase64.length} foto[s]) + mandaria DM pra ${tel}: ${dm}`)
+    // Marca no dedup pra o dry-run não logar o mesmo post a cada debounce.
+    jaProcessadosSet.add(chave)
+    salvarProspeccao()
+    return
+  }
+
+  // Real: enfileira o lead; o worker faz a chamada de API + DM com throttle.
+  prospeccao.fila.push({ tel, titulo, vendedorNome: dados.vendedorNome, preco: dados.preco, payload })
+  salvarProspeccao()
+  pushLog(`[prospeccao] lead enfileirado: ${titulo} → ${tel} (fila: ${prospeccao.fila.length}).`)
+}
+
+// Worker único da prospecção (espelha rodarCampanha): roda pra sempre, idle 30s
+// quando a fila esvazia, respeita ready/janela e cede a vez pro disparo manual.
+let prospeccaoRodando = false
+async function rodarProspeccao() {
+  if (prospeccaoRodando) return
+  prospeccaoRodando = true
+  for (;;) {
+    try {
+      if (!PROSPECCAO_ENABLED || PROSPECCAO_DRY_RUN || !prospeccao.fila.length) { await sleep(30000); continue }
+      if (!state.ready) { await sleep(30000); continue }
+      if (!janelaAberta()) { await sleep(60000); continue }
+      if (state.disparo.enviando) { await sleep(5000); continue } // cede pro disparo manual
+
+      const lead = prospeccao.fila[0]
+      const { tel, titulo, vendedorNome, preco, payload } = lead
+      try {
+        // 1) Cria o anúncio pré-montado no app (envia as fotos como base64).
+        // Timeout de 20s: sem ele, uma request pendurada travaria o worker único
+        // pra sempre. No estouro, AbortError cai no catch e o lead conta como falha.
+        const ctrl = new AbortController()
+        const timeoutId = setTimeout(() => ctrl.abort(), 20000)
+        let resp
+        try {
+          resp = await fetch(`${BUYBIKE_API_URL}/api/admin/hub4-import`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${ADMIN_SECRET}`,
+            },
+            body: JSON.stringify(payload),
+            signal: ctrl.signal,
+          })
+        } finally {
+          clearTimeout(timeoutId)
+        }
+        if (!resp.ok) {
+          let detalhe = `HTTP ${resp.status}`
+          try { detalhe = (await resp.json())?.error || detalhe } catch {}
+          throw new Error(`API hub4-import: ${detalhe}`)
+        }
+        const { claim_url: claimUrl, already_existed: jaExistia } = await resp.json()
+
+        // Dedup cross-número: se OUTRO número/instância (ou rodada anterior) já criou
+        // o anúncio E já mandou a DM, não manda de novo. Só registra no dedup local.
+        if (jaExistia === true) {
+          pushLog(`[prospecção] já existia, pulando DM (outro número já tratou): ${titulo}`)
+          jaProcessadosSet.add(chaveDedup(tel, titulo))
+          prospeccao.fila.shift()
+          salvarProspeccao()
+          continue
+        }
+
+        if (!claimUrl) throw new Error('API não retornou claim_url')
+
+        // 2) Monta e envia a DM personalizada.
+        const dm = mensagemReivindicacao({ vendedorNome, titulo, preco, claimUrl })
+        const numberId = await client.getNumberId(tel)
+        if (!numberId) {
+          pushLog(`[prospeccao] ✗ ${tel} — sem WhatsApp, pulando.`)
+          prospeccao.falhas.push({ tel, titulo, erro: 'sem WhatsApp', em: new Date().toISOString() })
+        } else {
+          await client.sendMessage(numberId._serialized, dm)
+          jaProcessadosSet.add(chaveDedup(tel, titulo))
+          prospeccao.enviados.push({ tel, titulo, claimUrl, em: new Date().toISOString() })
+          pushLog(`[prospeccao] ✓ DM enviada pra ${tel} (${titulo}).`)
+        }
+      } catch (e) {
+        pushLog(`[prospeccao] ✗ ${tel} — erro: ${e.message}`)
+        prospeccao.falhas.push({ tel, titulo, erro: e.message, em: new Date().toISOString() })
+      }
+      prospeccao.fila.shift()
+      salvarProspeccao()
+
+      // Freios anti-ban (iguais à campanha): pausa a cada lote, senão delay aleatório.
+      if (!prospeccao.fila.length) continue
+      if (prospeccao.enviados.length % LOTE === 0) {
+        pushLog(`[prospeccao] lote de ${LOTE} — pausa de ${PAUSA_LOTE / 1000}s.`)
+        await sleep(PAUSA_LOTE)
+      } else {
+        await sleep(rand(DELAY_MIN, DELAY_MAX))
+      }
+    } catch (e) {
+      pushLog(`[prospeccao] erro no loop: ${e.message}`)
+      await sleep(60000)
+    }
+  }
+}
+
 // O profile do Chromium vive no volume persistente. Se o container morre sem
 // fechar o Chromium (deploy/crash), sobra um SingletonLock no profile e o próximo
 // container recusa o launch ("profile in use on another computer") → crash loop.
@@ -431,6 +856,10 @@ client.initialize().catch((e) => {
 // Retoma campanha persistida (se houver) e liga o worker multi-dia.
 carregarCampanha()
 rodarCampanha()
+
+// Retoma a prospecção persistida (fila + dedup) e liga o worker de DM.
+carregarProspeccao()
+rodarProspeccao().catch((e) => pushLog('[prospecção] worker morreu: ' + e.message))
 
 // ─── Página de QR / status / disparo ──────────────────────────────────────────
 const app = express()
@@ -467,6 +896,17 @@ app.get('/api/status', (req, res) => {
           concluida: campanha.pendentes.length === 0,
         }
       : null,
+    prospeccao: {
+      enabled: PROSPECCAO_ENABLED,
+      dryRun: PROSPECCAO_DRY_RUN,
+      // Modo de matching do grupo-alvo: por NOME (regex) + override opcional por JID.
+      grupoMatch: { regex: GRUPO_ALVO_REGEX_SRC, jids: [...GRUPO_ALVO_IDS] },
+      gruposAlvoAtivos: [...grupoAlvoCache.entries()].filter(([, v]) => v).map(([jid]) => jid),
+      fila: prospeccao.fila.length,
+      enviados: prospeccao.enviados.length,
+      falhas: prospeccao.falhas.length,
+      jaProcessados: jaProcessadosSet.size,
+    },
     log: state.log.slice(-200),
   })
 })
@@ -573,6 +1013,41 @@ app.post('/api/disparo/parar', (req, res) => {
   disparoCancelar = true
   pushLog('Pedido de PARAR disparo recebido.')
   res.json({ ok: true })
+})
+
+// ─── Prospecção: descoberta de grupos + teste de extração ──────────────────────
+// Lista os grupos do WhatsApp pra você descobrir o GRUPO_ALVO_ID.
+app.get('/api/grupos', async (req, res) => {
+  if (!autorizado(req)) return res.status(401).json({ erro: 'token inválido' })
+  if (!state.ready) return res.status(409).json({ erro: 'WhatsApp não conectado ainda.' })
+  try {
+    const chats = await client.getChats()
+    const grupos = chats.filter((c) => c.isGroup).map((c) => ({ id: c.id._serialized, name: c.name }))
+    res.json({ grupos })
+  } catch (e) {
+    res.status(500).json({ erro: e.message })
+  }
+})
+
+// Valida a extração de um card de texto SEM criar anúncio nem mandar DM.
+app.post('/api/prospeccao/testar', async (req, res) => {
+  if (!autorizado(req)) return res.status(401).json({ erro: 'token inválido' })
+  const { texto } = req.body || {}
+  if (!texto || !texto.trim()) return res.status(400).json({ erro: 'Texto vazio.' })
+  try {
+    const dados = await extrairPost({ texto })
+    const dm = dados.ehAnuncioBike
+      ? mensagemReivindicacao({
+          vendedorNome: dados.vendedorNome,
+          titulo: dados.titulo,
+          preco: dados.preco,
+          claimUrl: `${BUYBIKE_API_URL}/claim/<uuid-placeholder>`,
+        })
+      : null
+    res.json({ dados, dm })
+  } catch (e) {
+    res.status(500).json({ erro: e.message })
+  }
 })
 
 app.get('/healthz', (_req, res) => res.json({ ok: true, ready: state.ready }))
