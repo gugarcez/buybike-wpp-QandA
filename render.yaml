@@ -1,0 +1,42 @@
+# Render Blueprint — bot Cláudia + Prospecção Hub4 (whatsapp-web.js).
+# Migração do Railway. IMPORTANTE: precisa de plano PAGO (Starter, ~US$7/mês):
+#  - o disco persistente guarda a sessão do WhatsApp (senão re-scan do QR a cada deploy);
+#  - o serviço fica always-on (o free do Render dorme após ~15 min ocioso, o que mataria
+#    o listener do grupo — inviável pra um bot 24/7).
+# O PORT é injetado pelo Render; o app já lê process.env.PORT. Chromium/WWEB_AUTH/NODE_ENV
+# já vêm do Dockerfile (WWEB_AUTH=/app/.wwebjs_auth casa com o mountPath do disco abaixo).
+services:
+  - type: web
+    name: buybike-wpp-qanda
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    region: oregon
+    healthCheckPath: /healthz
+    autoDeploy: true
+    disk:
+      name: wweb-auth
+      mountPath: /app/.wwebjs_auth
+      sizeGB: 1
+    envVars:
+      # Prospecção — nasce segura: dry-run ligado e feature desligada até validar.
+      - key: PROSPECCAO_MODO
+        value: push
+      - key: PROSPECCAO_ENABLED
+        value: "false"
+      - key: PROSPECCAO_DRY_RUN
+        value: "true"
+      - key: OPERADOR_NOME
+        value: Gustavo
+      - key: BUYBIKE_API_URL
+        value: https://buybike.com.br
+      # Segredos — defina os valores no dashboard do Render (Environment). sync:false =
+      # não versionar no repo.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: ADMIN_SECRET
+        sync: false
+      - key: OPERADOR_NUMERO
+        sync: false

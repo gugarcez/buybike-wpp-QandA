@@ -39,6 +39,7 @@ Campos do JSON:
 - cidade (string|null): cidade, se citada.
 - vendedorNome (string|null): nome do contato (ex.: "André").
 - telefone (string|null): telefone do "Contato" (ex.: "(24)99854-0606"). Mantenha como veio.
+- instagram (string|null): @ do Instagram do contato, se aparecer na linha de contato (ex.: "@360bypmancini"). Com ou sem @, sem espaços. NÃO confunda com o link de "Anúncio completo" (esse é o post no IG — ignore). null se não houver.
 
 Se NÃO for um anúncio de bike à venda, retorne {"ehAnuncioBike": false}.`
 
@@ -66,6 +67,10 @@ function extrairMock(texto = '') {
   const mContato = texto.match(/contato:?\s*([A-Za-zÀ-ÿ]+)/i)
   const vendedorNome = mContato ? mContato[1] : null
 
+  // @handle do IG (ignora o "Anúncio completo" que é URL, não @).
+  const mIg = texto.match(/@([A-Za-z0-9._]{2,})/)
+  const instagram = mIg ? mIg[1] : null
+
   const ehAnuncioBike = !!(telefone && preco)
   if (!ehAnuncioBike) return { ehAnuncioBike: false }
 
@@ -84,6 +89,7 @@ function extrairMock(texto = '') {
     cidade: null,
     vendedorNome,
     telefone,
+    instagram,
   }
 }
 
@@ -112,6 +118,8 @@ export async function extrairPost({ texto }) {
     if (!dados || !dados.ehAnuncioBike) return { ehAnuncioBike: false }
     // Normaliza categoria pra um slug válido (a IA às vezes inventa).
     if (!CATEGORIAS.includes(dados.categoria)) dados.categoria = 'estrada'
+    // Normaliza o @ do IG: sem @, minúsculo, só o handle.
+    if (dados.instagram) dados.instagram = String(dados.instagram).replace(/^@+/, '').trim().toLowerCase() || null
     return dados
   } catch (err) {
     console.error('[prospeccao] erro na extração:', err?.message)
@@ -175,4 +183,22 @@ export function mensagemReivindicacao({ vendedorNome, titulo, preco, claimUrl })
 
   const idx = hashStr(`${vendedorNome || ''}|${titulo || ''}`) % templates.length
   return templates[idx]
+}
+
+// Mensagem PESSOAL (voz do operador, ex.: Gustavo) que vai PRÉ-PREENCHIDA no link
+// wa.me do push. Quem envia é o operador, tocando o link no próprio WhatsApp — não
+// há disparo automático pro vendedor. Honesta: o rascunho REALMENTE já foi montado
+// (chamada hub4-import) antes desta mensagem ser gerada.
+export function mensagemPessoal({ vendedorNome, titulo, preco, claimUrl, operador = 'Gustavo' }) {
+  const primeiroNome = (vendedorNome || '').trim().split(/\s+/)[0]
+  const saudacao = primeiroNome ? `Oi ${primeiroNome}!` : 'Oi!'
+  const precoFmt = formatarPreco(preco)
+  const tituloTxt = titulo || 'sua bike'
+  const comPreco = precoFmt ? ` (${precoFmt})` : ''
+  return (
+    `${saudacao} Vi sua ${tituloTxt}${comPreco} no Hub4. Sou o ${operador}, da Buybike — ` +
+    `marketplace de bikes premium. Já deixei um rascunho do anúncio dela montado pra você ` +
+    `aparecer pra compradores do Brasil todo, grátis e sem comissão (o contato vem direto pra você). ` +
+    `É só revisar e publicar aqui: ${claimUrl} — leva uns 30s. Qualquer coisa, me chama!`
+  )
 }

@@ -7,7 +7,7 @@ import { dirname, join } from 'path'
 import { readdirSync, rmSync, existsSync, writeFileSync, readFileSync } from 'fs'
 
 import { responderComoClaudia, CLAUDIA_SUPPRESS, RESPOSTA_MOCK } from './claudia.js'
-import { extrairPost, mensagemReivindicacao } from './prospeccao.js'
+import { extrairPost, mensagemReivindicacao, mensagemPessoal } from './prospeccao.js'
 
 const { Client, LocalAuth } = pkg
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -80,6 +80,19 @@ const PROSPECCAO_DEBOUNCE_MS = Number(process.env.PROSPECCAO_DEBOUNCE_MS || 3000
 // trocados). Ao estourar, o buffer atual é flushado e um novo começa.
 const PROSPECCAO_BUFFER_MAX_MS = Number(process.env.PROSPECCAO_BUFFER_MAX_MS || 90000)
 const PROSPECCAO_FILE = join(WWEB_AUTH, 'prospeccao.json')
+// Modo de contato com o vendedor:
+//  'push'  (padrão) → NÃO manda pro vendedor. Cria o rascunho, gera um link wa.me
+//          pré-preenchido e AVISA o operador (OPERADOR_NUMERO). O operador toca o
+//          link no próprio WhatsApp e envia — envio humano, do número dele.
+//  'auto'  (legado) → dispara a DM direto pro vendedor pelo número do bot.
+const PROSPECCAO_MODO = process.env.PROSPECCAO_MODO === 'auto' ? 'auto' : 'push'
+// Número pessoal do operador que recebe o push (obrigatório no modo 'push').
+// Diferente dos vendedores (BR), o operador pode ter DDI internacional (ex.: +34…),
+// então aqui NÃO forçamos 55 — só limpamos os dígitos, preservando o DDI informado.
+// Informe SEMPRE com código do país (ex.: 34627201639 para +34 627 201 639).
+const OPERADOR_NUMERO =
+  String(process.env.OPERADOR_NUMERO || '').replace(/\D/g, '').replace(/^0+/, '') || null
+const OPERADOR_NOME = process.env.OPERADOR_NOME || 'Gustavo'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min
@@ -455,8 +468,9 @@ async function rodarCampanha() {
 // Estado persistente: fila de leads + dedup + histórico. Salvo no volume, mesmo
 // padrão do CAMPANHA_FILE.
 const prospeccao = {
-  fila: [], // leads aguardando criação de anúncio + DM
-  enviados: [], // { tel, titulo, claimUrl, em } com sucesso
+  fila: [], // leads aguardando criação de anúncio + DM/push
+  enviados: [], // { tel, titulo, claimUrl, em } com sucesso (modo auto)
+  pushados: [], // { tel, titulo, claimUrl, waLink, em } push enviado ao operador (modo push)
   falhas: [], // { tel, titulo, erro, em }
   jaProcessados: [], // chaves `${tel}|${tituloNorm}` já tratadas (dedup)
 }
@@ -485,6 +499,7 @@ function carregarProspeccao() {
       const dados = JSON.parse(readFileSync(PROSPECCAO_FILE, 'utf8'))
       prospeccao.fila = dados.fila || []
       prospeccao.enviados = dados.enviados || []
+      prospeccao.pushados = dados.pushados || []
       prospeccao.falhas = dados.falhas || []
       prospeccao.jaProcessados = dados.jaProcessados || []
       jaProcessadosSet = new Set(prospeccao.jaProcessados)
@@ -719,23 +734,51 @@ async function processarPostGrupo(post) {
   }
 
   if (PROSPECCAO_DRY_RUN) {
-    const dm = mensagemReivindicacao({
-      vendedorNome: dados.vendedorNome,
-      titulo,
-      preco: dados.preco,
-      claimUrl: `${BUYBIKE_API_URL}/claim/<uuid-dry-run>`,
-    })
-    pushLog(`[DRY-RUN] criaria anúncio (${payload.fotosBase64.length} foto[s]) + mandaria DM pra ${tel}: ${dm}`)
+    const claimUrl = `${BUYBIKE_API_URL}/claim/<uuid-dry-run>`
+    if (PROSPECCAO_MODO === 'push') {
+      const dm = mensagemPessoal({ vendedorNome: dados.vendedorNome, titulo, preco: dados.preco, claimUrl, operador: OPERADOR_NOME })
+      const waLink = `https://wa.me/${tel}?text=${encodeURIComponent(dm)}`
+      const alvo = OPERADOR_NUMERO ? `${OPERADOR_NOME} (${OPERADOR_NUMERO})` : 'OPERADOR — ⚠️ OPERADOR_NUMERO não setado'
+      const igTxt = dados.instagram ? ` + IG @${dados.instagram} (instagram.com/${dados.instagram})` : ''
+      pushLog(`[DRY-RUN/push] criaria anúncio (${payload.fotosBase64.length} foto[s]) + avisaria ${alvo} com link: ${waLink}${igTxt}`)
+    } else {
+      const dm = mensagemReivindicacao({ vendedorNome: dados.vendedorNome, titulo, preco: dados.preco, claimUrl })
+      pushLog(`[DRY-RUN/auto] criaria anúncio (${payload.fotosBase64.length} foto[s]) + mandaria DM pra ${tel}: ${dm}`)
+    }
     // Marca no dedup pra o dry-run não logar o mesmo post a cada debounce.
     jaProcessadosSet.add(chave)
     salvarProspeccao()
     return
   }
 
-  // Real: enfileira o lead; o worker faz a chamada de API + DM com throttle.
-  prospeccao.fila.push({ tel, titulo, vendedorNome: dados.vendedorNome, preco: dados.preco, payload })
+  // Real: enfileira o lead; o worker faz a chamada de API + push com throttle.
+  prospeccao.fila.push({ tel, titulo, vendedorNome: dados.vendedorNome, preco: dados.preco, instagram: dados.instagram || null, payload })
   salvarProspeccao()
   pushLog(`[prospeccao] lead enfileirado: ${titulo} → ${tel} (fila: ${prospeccao.fila.length}).`)
+}
+
+// Monta o texto do push pro operador (usado pelo worker e pelo endpoint de teste).
+// Retorna { push, waLink }. Com teste=true, marca como teste e avisa que o rascunho
+// é placeholder — pra não reencaminhar pro vendedor sem querer.
+function montarPushProspeccao({ tel, titulo, vendedorNome, preco, instagram, claimUrl, teste = false }) {
+  const dm = mensagemPessoal({ vendedorNome, titulo, preco, claimUrl, operador: OPERADOR_NOME })
+  const waLink = `https://wa.me/${tel}?text=${encodeURIComponent(dm)}`
+  const igLink = instagram ? `https://instagram.com/${instagram}` : null
+  const precoTxt = Number(preco) > 0 ? ` — R$ ${Math.round(preco).toLocaleString('pt-BR')}` : ''
+  const linhas = [
+    `${teste ? '🧪 TESTE — ' : ''}🚲 Novo anúncio no Hub4 — pronto pra você enviar`,
+    '',
+    `*${titulo || 'Bike'}*${precoTxt}`,
+    `Vendedor: ${vendedorNome || tel}${instagram ? ` (@${instagram})` : ''}`,
+    '',
+    `Rascunho na Buybike: ${claimUrl}`,
+    '',
+    '📱 WhatsApp — toque pra abrir o chat com a msg pronta (é só enviar):',
+    waLink,
+  ]
+  if (igLink) linhas.push('', `📸 Instagram — abra o perfil e cole a mensagem: ${igLink}`, '', '✍️ Mensagem (copiar):', dm)
+  if (teste) linhas.push('', '⚠️ Teste: o link do rascunho é placeholder — NÃO reencaminhe pro vendedor.')
+  return { push: linhas.join('\n'), waLink }
 }
 
 // Worker único da prospecção (espelha rodarCampanha): roda pra sempre, idle 30s
@@ -752,7 +795,7 @@ async function rodarProspeccao() {
       if (state.disparo.enviando) { await sleep(5000); continue } // cede pro disparo manual
 
       const lead = prospeccao.fila[0]
-      const { tel, titulo, vendedorNome, preco, payload } = lead
+      const { tel, titulo, vendedorNome, preco, instagram, payload } = lead
       try {
         // 1) Cria o anúncio pré-montado no app (envia as fotos como base64).
         // Timeout de 20s: sem ele, uma request pendurada travaria o worker único
@@ -792,17 +835,32 @@ async function rodarProspeccao() {
 
         if (!claimUrl) throw new Error('API não retornou claim_url')
 
-        // 2) Monta e envia a DM personalizada.
-        const dm = mensagemReivindicacao({ vendedorNome, titulo, preco, claimUrl })
-        const numberId = await client.getNumberId(tel)
-        if (!numberId) {
-          pushLog(`[prospeccao] ✗ ${tel} — sem WhatsApp, pulando.`)
-          prospeccao.falhas.push({ tel, titulo, erro: 'sem WhatsApp', em: new Date().toISOString() })
-        } else {
-          await client.sendMessage(numberId._serialized, dm)
+        if (PROSPECCAO_MODO === 'push') {
+          // 2) MODO PUSH (padrão): NÃO manda pro vendedor. Gera o link wa.me
+          // pré-preenchido (mensagem na voz do operador) e avisa o OPERADOR no
+          // WhatsApp dele. Ele toca o link → abre o chat com o vendedor com a msg
+          // pronta → ELE envia. Envio humano, do número dele — sem disparo automático.
+          if (!OPERADOR_NUMERO) throw new Error('OPERADOR_NUMERO não configurado (modo push)')
+          const { push, waLink } = montarPushProspeccao({ tel, titulo, vendedorNome, preco, instagram, claimUrl })
+          const opId = await client.getNumberId(OPERADOR_NUMERO)
+          if (!opId) throw new Error(`OPERADOR_NUMERO sem WhatsApp: ${OPERADOR_NUMERO}`)
+          await client.sendMessage(opId._serialized, push)
           jaProcessadosSet.add(chaveDedup(tel, titulo))
-          prospeccao.enviados.push({ tel, titulo, claimUrl, em: new Date().toISOString() })
-          pushLog(`[prospeccao] ✓ DM enviada pra ${tel} (${titulo}).`)
+          prospeccao.pushados.push({ tel, titulo, claimUrl, waLink, instagram: instagram || null, em: new Date().toISOString() })
+          pushLog(`[prospeccao] ✓ PUSH pro operador — ${titulo} → ${tel} (você toca pra enviar).`)
+        } else {
+          // 2) MODO AUTO (legado): dispara a DM direto pro vendedor pelo número do bot.
+          const dm = mensagemReivindicacao({ vendedorNome, titulo, preco, claimUrl })
+          const numberId = await client.getNumberId(tel)
+          if (!numberId) {
+            pushLog(`[prospeccao] ✗ ${tel} — sem WhatsApp, pulando.`)
+            prospeccao.falhas.push({ tel, titulo, erro: 'sem WhatsApp', em: new Date().toISOString() })
+          } else {
+            await client.sendMessage(numberId._serialized, dm)
+            jaProcessadosSet.add(chaveDedup(tel, titulo))
+            prospeccao.enviados.push({ tel, titulo, claimUrl, em: new Date().toISOString() })
+            pushLog(`[prospeccao] ✓ DM enviada pra ${tel} (${titulo}).`)
+          }
         }
       } catch (e) {
         pushLog(`[prospeccao] ✗ ${tel} — erro: ${e.message}`)
@@ -811,9 +869,12 @@ async function rodarProspeccao() {
       prospeccao.fila.shift()
       salvarProspeccao()
 
-      // Freios anti-ban (iguais à campanha): pausa a cada lote, senão delay aleatório.
+      // Freios anti-ban. No modo push só avisamos o operador (1 chat), então basta
+      // um respiro curto. No modo auto (envio ao vendedor), mantém os freios da campanha.
       if (!prospeccao.fila.length) continue
-      if (prospeccao.enviados.length % LOTE === 0) {
+      if (PROSPECCAO_MODO === 'push') {
+        await sleep(2000)
+      } else if (prospeccao.enviados.length % LOTE === 0) {
         pushLog(`[prospeccao] lote de ${LOTE} — pausa de ${PAUSA_LOTE / 1000}s.`)
         await sleep(PAUSA_LOTE)
       } else {
@@ -1045,6 +1106,38 @@ app.post('/api/prospeccao/testar', async (req, res) => {
         })
       : null
     res.json({ dados, dm })
+  } catch (e) {
+    res.status(500).json({ erro: e.message })
+  }
+})
+
+// Manda um PUSH DE TESTE pro operador (você), pra validar o fluxo sem tocar em
+// vendedor nem criar rascunho. Usa o texto enviado ou, se vazio, um anúncio-exemplo.
+// O claim_url é placeholder e o push vem marcado como TESTE.
+app.post('/api/prospeccao/test-push', async (req, res) => {
+  if (!autorizado(req)) return res.status(401).json({ erro: 'token inválido' })
+  if (!state.ready) return res.status(409).json({ erro: 'WhatsApp não conectado ainda.' })
+  if (!OPERADOR_NUMERO) return res.status(400).json({ erro: 'OPERADOR_NUMERO não configurado.' })
+  const EXEMPLO = [
+    'Canyon Ultimate CF SLX XS', '💵 R$35.000,00', '-Tamanho: XS', '-Ano: 2025',
+    '-SRAM Force AXS 12v', '-Contato: @giovanasuppioni (11)97068-9917',
+    'Anúncio completo: https://www.instagram.com/p/DbNw11lEbAo/',
+  ].join('\n')
+  const texto = (req.body?.texto || '').trim() || EXEMPLO
+  try {
+    const dados = await extrairPost({ texto })
+    if (!dados.ehAnuncioBike) return res.status(400).json({ erro: 'Não reconhecido como anúncio de bike.', dados })
+    const tel = normalizar(dados.telefone)
+    if (!tel && !dados.instagram) return res.status(400).json({ erro: 'Anúncio sem telefone nem @ de contato.', dados })
+    const { push } = montarPushProspeccao({
+      tel, titulo: dados.titulo, vendedorNome: dados.vendedorNome, preco: dados.preco,
+      instagram: dados.instagram, claimUrl: `${BUYBIKE_API_URL}/claim/TESTE`, teste: true,
+    })
+    const opId = await client.getNumberId(OPERADOR_NUMERO)
+    if (!opId) return res.status(400).json({ erro: `OPERADOR_NUMERO sem WhatsApp: ${OPERADOR_NUMERO}` })
+    await client.sendMessage(opId._serialized, push)
+    pushLog(`[prospeccao] push de TESTE enviado pro operador (${OPERADOR_NUMERO}).`)
+    res.json({ ok: true, enviadoPara: OPERADOR_NUMERO, dados })
   } catch (e) {
     res.status(500).json({ erro: e.message })
   }
