@@ -1172,6 +1172,65 @@ app.post('/api/prospeccao/test-push', async (req, res) => {
   }
 })
 
+// Diagnóstico do store + leitura de histórico de um grupo. Existe porque o store do
+// whatsapp-web.js quebra de forma parcial (msg.getChat() → erro 'r') e a gente precisa
+// saber COM PRECISÃO o que ainda funciona — e, se fetchMessages funcionar, dá pra
+// recuperar anúncios que o bot não presenciou (ex.: postados antes de ligar a flag).
+app.get('/api/prospeccao/historico', async (req, res) => {
+  if (!autorizado(req)) return res.status(401).json({ erro: 'token inválido' })
+  if (!state.ready) return res.status(409).json({ erro: 'WhatsApp não conectado ainda.' })
+  const jid = String(req.query.jid || '').trim()
+  if (!jid) return res.status(400).json({ erro: 'jid obrigatório.' })
+  const limite = Math.min(Number(req.query.limit || 30), 100)
+  const diag = { jid, wwebVersion: null, getChatById: 'não tentado', fetchMessages: 'não tentado' }
+  try { diag.wwebVersion = await client.getWWebVersion() } catch (e) { diag.wwebVersion = `erro: ${e.message}` }
+
+  let chat
+  try {
+    chat = await client.getChatById(jid)
+    diag.getChatById = `ok — nome: ${chat?.name || '(sem nome)'}`
+  } catch (e) {
+    diag.getChatById = `ERRO: ${e.message}`
+    return res.json({ diag, mensagens: [] })
+  }
+  try {
+    const msgs = await chat.fetchMessages({ limit: limite })
+    diag.fetchMessages = `ok — ${msgs.length} msg(s)`
+    const mensagens = msgs.map((m) => ({
+      em: new Date((m.timestamp || 0) * 1000).toISOString(),
+      autor: normalizar((m.author || m.from || '').replace(/@.*/, '')),
+      tipo: m.type,
+      temMidia: !!m.hasMedia,
+      corpo: (m.body || '').slice(0, 1200),
+    }))
+    res.json({ diag, mensagens })
+  } catch (e) {
+    diag.fetchMessages = `ERRO: ${e.message}`
+    res.json({ diag, mensagens: [] })
+  }
+})
+
+// Injeta um post NO FLUXO REAL (cria rascunho via hub4-import + push pro operador),
+// como se tivesse chegado do grupo. Serve pra reprocessar um anúncio que o bot não
+// presenciou. Respeita TODOS os gates (admins, dedup, dry-run) — não é atalho.
+app.post('/api/prospeccao/processar', async (req, res) => {
+  if (!autorizado(req)) return res.status(401).json({ erro: 'token inválido' })
+  if (!state.ready) return res.status(409).json({ erro: 'WhatsApp não conectado ainda.' })
+  const { texto, fotosBase64, grupoJid } = req.body || {}
+  if (!texto || !texto.trim()) return res.status(400).json({ erro: 'texto obrigatório.' })
+  try {
+    await processarPostGrupo({
+      texto: texto.trim(),
+      fotosBase64: Array.isArray(fotosBase64) ? fotosBase64 : [],
+      grupoJid: grupoJid || null,
+      grupoNome: null,
+    })
+    res.json({ ok: true, fila: prospeccao.fila.length, nota: 'Enfileirado; o worker cria o rascunho e manda o push. Acompanhe em /api/status.' })
+  } catch (e) {
+    res.status(500).json({ erro: e.message })
+  }
+})
+
 app.get('/healthz', (_req, res) => res.json({ ok: true, ready: state.ready }))
 
 app.get('/', (req, res) => {
