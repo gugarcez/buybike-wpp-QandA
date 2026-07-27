@@ -178,11 +178,14 @@ client.on('qr', async (qr) => {
 
 client.on('authenticated', () => pushLog('Autenticado ✓'))
 
-client.on('ready', () => {
+client.on('ready', async () => {
   state.ready = true
   state.qr = null
   state.me = client.info?.wid?.user || '?'
   pushLog(`Conectado como ${state.me} ✓ — atendente ${CLAUDIA_ENABLED ? 'ATIVO' : 'DESLIGADO (CLAUDIA_ENABLED=false)'}`)
+  // Sem isto a leitura de nome de grupo fica morta e a detecção só funciona por
+  // JID explícito — ver recuperarStore().
+  await recuperarStore()
 })
 
 client.on('disconnected', (reason) => {
@@ -532,6 +535,46 @@ const grupoAlvoCache = new Map() // jid → boolean
 // Guarda o nome resolvido do grupo (pra repassar ao processamento e logs).
 const grupoNomeCache = new Map() // jid → string
 
+// ─── Store cru do WhatsApp Web ────────────────────────────────────────────────
+// No build atual (2.3000.1043909971) o whatsapp-web.js NÃO expõe window.Store —
+// expõe AuthStore e WWebJS, mas os wrappers (getChat/getChatById/getChats) chamam
+// um store inexistente e estouram com 'r'. O require interno do WhatsApp continua
+// acessível, então remontamos as coleções que interessam. É isso que devolve a
+// leitura de nome de grupo; sem ela, a detecção depende de JID hardcoded.
+async function recuperarStore() {
+  try {
+    const ok = await client.pupPage.evaluate(() => {
+      if (window.Store?.Chat) return true
+      for (const mod of ['WAWebCollections', 'WAWebChatCollection', 'WAWebMsgCollection']) {
+        try {
+          const m = window.require(mod)
+          window.Store = window.Store || {}
+          if (m?.ChatCollection || m?.Chat) window.Store.Chat = m.ChatCollection || m.Chat
+          if (m?.MsgCollection || m?.Msg) window.Store.Msg = m.MsgCollection || m.Msg
+        } catch {}
+      }
+      return !!window.Store?.Chat
+    })
+    pushLog(ok ? '[store] coleções remontadas via require interno ✓' : '[store] não foi possível remontar — detecção de grupo só por GRUPO_ALVO_ID.')
+    return ok
+  } catch (e) {
+    pushLog(`[store] erro remontando: ${e.message}`)
+    return false
+  }
+}
+
+// Nome do grupo pelo store cru — sobrevive à quebra dos wrappers.
+async function nomeDoGrupoRaw(jid) {
+  try {
+    return await client.pupPage.evaluate((id) => {
+      const c = window.Store?.Chat?.get(id)
+      return c ? c.name || c.formattedTitle || null : null
+    }, jid)
+  } catch {
+    return null
+  }
+}
+
 async function ehGrupoAlvo(msg, jid) {
   if (grupoAlvoCache.has(jid)) return grupoAlvoCache.get(jid)
   // Override explícito por JID dispensa resolver o chat.
@@ -539,6 +582,18 @@ async function ehGrupoAlvo(msg, jid) {
     grupoAlvoCache.set(jid, true)
     return true
   }
+  // Nome pelo store cru primeiro: é o caminho que funciona no build atual. O
+  // wrapper abaixo fica como fallback pra quando o whatsapp-web.js voltar a expor
+  // o Store (aí ele também traz os participantes pro blocklist de admins).
+  const nomeRaw = await nomeDoGrupoRaw(jid)
+  if (nomeRaw) {
+    grupoNomeCache.set(jid, nomeRaw)
+    const alvo = GRUPO_ALVO_REGEX.test(nomeRaw)
+    grupoAlvoCache.set(jid, alvo)
+    pushLog(`[prospeccao] grupo "${nomeRaw}" (${jid}) → ${alvo ? 'ALVO' : 'ignorado'}.`)
+    return alvo
+  }
+
   try {
     const chat = await msg.getChat()
     const nome = chat?.name || ''
@@ -1111,8 +1166,14 @@ app.get('/api/grupos', async (req, res) => {
   if (!autorizado(req)) return res.status(401).json({ erro: 'token inválido' })
   if (!state.ready) return res.status(409).json({ erro: 'WhatsApp não conectado ainda.' })
   try {
-    const chats = await client.getChats()
-    const grupos = chats.filter((c) => c.isGroup).map((c) => ({ id: c.id._serialized, name: c.name }))
+    // Pelo store cru: client.getChats() estoura com 'r' no build atual do
+    // WhatsApp Web (ver recuperarStore()).
+    if (!(await recuperarStore())) return res.status(503).json({ erro: 'Store indisponível — não dá pra listar grupos.' })
+    const grupos = await client.pupPage.evaluate(() =>
+      window.Store.Chat.getModelsArray()
+        .filter((c) => String(c.id?._serialized || c.id).endsWith('@g.us'))
+        .map((c) => ({ id: String(c.id?._serialized || c.id), name: c.name || c.formattedTitle || null }))
+    )
     res.json({ grupos })
   } catch (e) {
     res.status(500).json({ erro: e.message })
@@ -1172,44 +1233,6 @@ app.post('/api/prospeccao/test-push', async (req, res) => {
   }
 })
 
-// Diagnóstico do store + leitura de histórico de um grupo. Existe porque o store do
-// whatsapp-web.js quebra de forma parcial (msg.getChat() → erro 'r') e a gente precisa
-// saber COM PRECISÃO o que ainda funciona — e, se fetchMessages funcionar, dá pra
-// recuperar anúncios que o bot não presenciou (ex.: postados antes de ligar a flag).
-app.get('/api/prospeccao/historico', async (req, res) => {
-  if (!autorizado(req)) return res.status(401).json({ erro: 'token inválido' })
-  if (!state.ready) return res.status(409).json({ erro: 'WhatsApp não conectado ainda.' })
-  const jid = String(req.query.jid || '').trim()
-  if (!jid) return res.status(400).json({ erro: 'jid obrigatório.' })
-  const limite = Math.min(Number(req.query.limit || 30), 100)
-  const diag = { jid, wwebVersion: null, getChatById: 'não tentado', fetchMessages: 'não tentado' }
-  try { diag.wwebVersion = await client.getWWebVersion() } catch (e) { diag.wwebVersion = `erro: ${e.message}` }
-
-  let chat
-  try {
-    chat = await client.getChatById(jid)
-    diag.getChatById = `ok — nome: ${chat?.name || '(sem nome)'}`
-  } catch (e) {
-    diag.getChatById = `ERRO: ${e.message}`
-    return res.json({ diag, mensagens: [] })
-  }
-  try {
-    const msgs = await chat.fetchMessages({ limit: limite })
-    diag.fetchMessages = `ok — ${msgs.length} msg(s)`
-    const mensagens = msgs.map((m) => ({
-      em: new Date((m.timestamp || 0) * 1000).toISOString(),
-      autor: normalizar((m.author || m.from || '').replace(/@.*/, '')),
-      tipo: m.type,
-      temMidia: !!m.hasMedia,
-      corpo: (m.body || '').slice(0, 1200),
-    }))
-    res.json({ diag, mensagens })
-  } catch (e) {
-    diag.fetchMessages = `ERRO: ${e.message}`
-    res.json({ diag, mensagens: [] })
-  }
-})
-
 // Injeta um post NO FLUXO REAL (cria rascunho via hub4-import + push pro operador),
 // como se tivesse chegado do grupo. Serve pra reprocessar um anúncio que o bot não
 // presenciou. Respeita TODOS os gates (admins, dedup, dry-run) — não é atalho.
@@ -1240,80 +1263,18 @@ app.get('/api/prospeccao/raw', async (req, res) => {
   if (!state.ready) return res.status(409).json({ erro: 'WhatsApp não conectado ainda.' })
   const jid = String(req.query.jid || '').trim() || null
   try {
-    // Sonda de frames: o store pode não estar no frame principal. Reporta onde está.
-    if (req.query.frames === '1') {
-      const frames = []
-      for (const f of client.pupPage.frames()) {
-        let info = { url: (f.url() || '').slice(0, 120), store: null, wwebjs: null, globais: [] }
-        try {
-          const g = await f.evaluate(() => ({
-            store: typeof window.Store,
-            wwebjs: typeof window.WWebJS,
-            globais: Object.keys(window).filter((k) => /store|wweb|wpp|moduleRaid|require/i.test(k)).slice(0, 25),
-          }))
-          info = { ...info, ...g }
-        } catch (e) { info.erro = e.message }
-        frames.push(info)
-      }
-      return res.json({ frames })
-    }
-    const out = await client.pupPage.evaluate(async (alvo) => {
-      const r = { temStore: typeof window.Store !== 'undefined', chaves: [], grupos: [], mensagens: [], erros: [] }
-      // window.Store não foi exposto pelo whatsapp-web.js neste build (daí o erro
-      // 'r' nos wrappers), mas o require interno do WhatsApp está disponível —
-      // então remontamos as coleções na mão.
-      if (!r.temStore) {
-        for (const mod of ['WAWebCollections', 'WAWebChatCollection', 'WAWebMsgCollection']) {
-          try {
-            const m = window.require(mod)
-            if (m?.ChatCollection || m?.Chat) {
-              window.Store = window.Store || {}
-              window.Store.Chat = m.ChatCollection || m.Chat
-              window.Store.Msg = m.MsgCollection || m.Msg || window.Store.Msg
-              r.chaves.push(`recuperado de ${mod}`)
-            } else if (m?.MsgCollection || m?.Msg) {
-              window.Store = window.Store || {}
-              window.Store.Msg = m.MsgCollection || m.Msg
-              r.chaves.push(`msgs de ${mod}`)
-            }
-          } catch (e) { r.erros.push(`${mod}: ${e.message}`) }
-        }
-        r.temStore = !!(window.Store && window.Store.Chat)
-        if (!r.temStore) return r
-      }
-      try { r.chaves.push(...Object.keys(window.Store).filter((k) => /^(Chat|Msg|GroupMetadata|Contact)$/.test(k))) } catch (e) { r.erros.push('chaves: ' + e.message) }
+    const temStore = await recuperarStore()
+    if (!temStore) return res.json({ temStore: false, grupos: [], mensagens: [] })
+    const out = await client.pupPage.evaluate((alvo) => {
+      const r = { temStore: true, grupos: [], mensagens: [], erros: [] }
       try {
-        const chats = window.Store.Chat.getModelsArray()
-        r.grupos = chats
+        r.grupos = window.Store.Chat.getModelsArray()
           .filter((c) => String(c.id?._serialized || c.id).endsWith('@g.us'))
           .map((c) => ({ id: String(c.id?._serialized || c.id), nome: c.name || c.formattedTitle || null }))
-      } catch (e) { r.erros.push('Chat.getModelsArray: ' + e.message) }
+      } catch (e) { r.erros.push('Chat: ' + e.message) }
+      // Só a janela que a página já carregou: o modelo do chat deste build não
+      // expõe loadEarlierMsgs, então não há histórico retroativo por aqui.
       if (alvo) {
-        // O store só traz a janela já carregada. Pra alcançar posts mais antigos,
-        // pede ao próprio modelo do chat pra carregar mensagens anteriores. Os nomes
-        // desses métodos mudam entre builds, então descobrimos por enumeração.
-        try {
-          const chat = window.Store.Chat.get(alvo)
-          r.chatEncontrado = !!chat
-          if (chat) {
-            const alvos = [chat, chat.msgs].filter(Boolean)
-            for (const obj of alvos) {
-              const nomes = new Set()
-              let p = obj
-              for (let i = 0; i < 4 && p; i++) {
-                Object.getOwnPropertyNames(p).forEach((n) => nomes.add(n))
-                p = Object.getPrototypeOf(p)
-              }
-              const carregadores = [...nomes].filter((n) => /loadEarlier|loadMore|loadAround|fetchOlder/i.test(n))
-              r.metodos = (r.metodos || []).concat(carregadores.map((n) => `${obj === chat ? 'chat' : 'chat.msgs'}.${n}`))
-              for (const nome of carregadores) {
-                try {
-                  if (typeof obj[nome] === 'function') { await obj[nome](); r.carregou = (r.carregou || []).concat(nome) }
-                } catch (e) { r.erros.push(`${nome}: ${e.message}`) }
-              }
-            }
-          }
-        } catch (e) { r.erros.push('loadEarlier: ' + e.message) }
         try {
           r.mensagens = window.Store.Msg.getModelsArray()
             .filter((m) => String(m.id?.remote?._serialized || m.id?.remote || '') === alvo)
@@ -1323,7 +1284,7 @@ app.get('/api/prospeccao/raw', async (req, res) => {
               tipo: m.type,
               corpo: String(m.body || m.caption || '').slice(0, 1200),
             }))
-        } catch (e) { r.erros.push('Msg.getModelsArray: ' + e.message) }
+        } catch (e) { r.erros.push('Msg: ' + e.message) }
       }
       return r
     }, jid)
