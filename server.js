@@ -70,7 +70,10 @@ const GRUPO_ALVO_IDS = new Set(
 )
 const PROSPECCAO_ENABLED = process.env.PROSPECCAO_ENABLED === 'true' // default false
 const PROSPECCAO_DRY_RUN = process.env.PROSPECCAO_DRY_RUN !== 'false' // default true
-const BUYBIKE_API_URL = process.env.BUYBIKE_API_URL || 'https://buybike.com.br'
+// COM www de propósito: buybike.com.br responde 301 pro www, e o fetch do Node
+// (spec) REMOVE o header Authorization em redirect cross-origin — o hub4-import
+// voltava 403 e o lead morria sem push. Não trocar pro apex.
+const BUYBIKE_API_URL = process.env.BUYBIKE_API_URL || 'https://www.buybike.com.br'
 const ADMIN_SECRET = process.env.ADMIN_SECRET || '' // bearer pro /api/admin/hub4-import
 // Debounce do pareamento: foto(s) + card de texto chegam como msgs separadas, com
 // segundos de diferença. Acumula tudo que chega do grupo e processa quando "esfria".
