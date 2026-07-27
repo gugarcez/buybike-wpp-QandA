@@ -1257,7 +1257,7 @@ app.get('/api/prospeccao/raw', async (req, res) => {
       }
       return res.json({ frames })
     }
-    const out = await client.pupPage.evaluate((alvo) => {
+    const out = await client.pupPage.evaluate(async (alvo) => {
       const r = { temStore: typeof window.Store !== 'undefined', chaves: [], grupos: [], mensagens: [], erros: [] }
       // window.Store não foi exposto pelo whatsapp-web.js neste build (daí o erro
       // 'r' nos wrappers), mas o require interno do WhatsApp está disponível —
@@ -1289,6 +1289,31 @@ app.get('/api/prospeccao/raw', async (req, res) => {
           .map((c) => ({ id: String(c.id?._serialized || c.id), nome: c.name || c.formattedTitle || null }))
       } catch (e) { r.erros.push('Chat.getModelsArray: ' + e.message) }
       if (alvo) {
+        // O store só traz a janela já carregada. Pra alcançar posts mais antigos,
+        // pede ao próprio modelo do chat pra carregar mensagens anteriores. Os nomes
+        // desses métodos mudam entre builds, então descobrimos por enumeração.
+        try {
+          const chat = window.Store.Chat.get(alvo)
+          r.chatEncontrado = !!chat
+          if (chat) {
+            const alvos = [chat, chat.msgs].filter(Boolean)
+            for (const obj of alvos) {
+              const nomes = new Set()
+              let p = obj
+              for (let i = 0; i < 4 && p; i++) {
+                Object.getOwnPropertyNames(p).forEach((n) => nomes.add(n))
+                p = Object.getPrototypeOf(p)
+              }
+              const carregadores = [...nomes].filter((n) => /loadEarlier|loadMore|loadAround|fetchOlder/i.test(n))
+              r.metodos = (r.metodos || []).concat(carregadores.map((n) => `${obj === chat ? 'chat' : 'chat.msgs'}.${n}`))
+              for (const nome of carregadores) {
+                try {
+                  if (typeof obj[nome] === 'function') { await obj[nome](); r.carregou = (r.carregou || []).concat(nome) }
+                } catch (e) { r.erros.push(`${nome}: ${e.message}`) }
+              }
+            }
+          }
+        } catch (e) { r.erros.push('loadEarlier: ' + e.message) }
         try {
           r.mensagens = window.Store.Msg.getModelsArray()
             .filter((m) => String(m.id?.remote?._serialized || m.id?.remote || '') === alvo)
