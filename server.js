@@ -86,6 +86,18 @@ const PROSPECCAO_FILE = join(WWEB_AUTH, 'prospeccao.json')
 //          link no próprio WhatsApp e envia — envio humano, do número dele.
 //  'auto'  (legado) → dispara a DM direto pro vendedor pelo número do bot.
 const PROSPECCAO_MODO = process.env.PROSPECCAO_MODO === 'auto' ? 'auto' : 'push'
+// Blocklist ESTÁTICA de admins (telefones separados por vírgula). Existe porque o
+// store do whatsapp-web.js quebra periodicamente (getChat/getChatById → erro 'r') e
+// aí os admins do grupo NUNCA resolvem — com o fail-closed abaixo, todo lead era
+// descartado e a prospecção ficava morta. Esta lista é o fallback: quando os admins
+// dinâmicos não resolvem, ela assume o papel de guarda (donos da Hub4 nunca viram
+// prospect). Só vale como fallback — se o store voltar, o set dinâmico tem prioridade.
+const ADMINS_BLOCK = new Set(
+  (process.env.ADMINS_BLOCK || '')
+    .split(',')
+    .map((s) => normalizar(s.trim()))
+    .filter(Boolean)
+)
 // Número pessoal do operador que recebe o push (obrigatório no modo 'push').
 // Diferente dos vendedores (BR), o operador pode ter DDI internacional (ex.: +34…),
 // então aqui NÃO forçamos 55 — só limpamos os dígitos, preservando o DDI informado.
@@ -575,6 +587,11 @@ async function bufferarMsgGrupo(msg, jid) {
       return // outros tipos (sticker, áudio, etc.) não fazem parte do post
     }
 
+    // Identidade do grupo SEM depender do store (getChat() quebra com erro 'r'): loga
+    // o autor da msg. No Hub4 quem posta é sempre o admin, então o autor identifica o
+    // grupo — é assim que se descobre qual JID pôr em GRUPO_ALVO_ID.
+    pushLog(`[prospeccao] msg de grupo ${jid} — autor ${normalizar((msg.author || '').replace(/@.*/, '')) || '?'} (${msg.type}).`)
+
     const agora = Date.now()
     let buf = postBuffers.get(jid)
 
@@ -691,12 +708,19 @@ async function processarPostGrupo(post) {
   if (post.grupoJid) {
     try { await atualizarAdminsGrupo(await client.getChatById(post.grupoJid)) } catch {}
   }
-  // FAIL-CLOSED: se não conseguimos resolver os admins DESTE grupo (set ausente ou
-  // vazio), pulamos por segurança — jamais arriscar uma DM pra um admin Hub4.
-  const adminsDoGrupo = post.grupoJid ? adminsPorGrupo.get(post.grupoJid) : null
-  if (!adminsDoGrupo || adminsDoGrupo.size === 0) {
-    pushLog(`[prospecção] admins do grupo não resolvidos, pulando por segurança: ${tel}`)
+  // Blocklist efetiva: o set dinâmico do grupo tem prioridade; se ele não resolveu
+  // (store do whatsapp-web.js quebrado), cai na lista estática ADMINS_BLOCK.
+  const adminsDinamicos = post.grupoJid ? adminsPorGrupo.get(post.grupoJid) : null
+  const dinamicoOk = adminsDinamicos && adminsDinamicos.size > 0
+  const adminsDoGrupo = dinamicoOk ? adminsDinamicos : ADMINS_BLOCK
+  // FAIL-CLOSED: sem NENHUMA fonte de admins (dinâmica quebrada E ADMINS_BLOCK vazia)
+  // pulamos por segurança — jamais arriscar contato com um admin Hub4.
+  if (adminsDoGrupo.size === 0) {
+    pushLog(`[prospecção] admins não resolvidos e ADMINS_BLOCK vazia — pulando por segurança: ${tel}`)
     return
+  }
+  if (!dinamicoOk) {
+    pushLog(`[prospeccao] admins do grupo não resolvidos — usando ADMINS_BLOCK estática (${adminsDoGrupo.size} nº).`)
   }
   if (adminsDoGrupo.has(tel)) {
     pushLog(`[prospeccao] contato ${tel} é admin do grupo (Hub4) — pulando.`)
@@ -963,6 +987,8 @@ app.get('/api/status', (req, res) => {
       // Modo de matching do grupo-alvo: por NOME (regex) + override opcional por JID.
       grupoMatch: { regex: GRUPO_ALVO_REGEX_SRC, jids: [...GRUPO_ALVO_IDS] },
       gruposAlvoAtivos: [...grupoAlvoCache.entries()].filter(([, v]) => v).map(([jid]) => jid),
+      modo: PROSPECCAO_MODO,
+      adminsBlockEstatica: ADMINS_BLOCK.size,
       fila: prospeccao.fila.length,
       enviados: prospeccao.enviados.length,
       falhas: prospeccao.falhas.length,
