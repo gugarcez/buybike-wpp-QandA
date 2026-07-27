@@ -1240,6 +1240,23 @@ app.get('/api/prospeccao/raw', async (req, res) => {
   if (!state.ready) return res.status(409).json({ erro: 'WhatsApp não conectado ainda.' })
   const jid = String(req.query.jid || '').trim() || null
   try {
+    // Sonda de frames: o store pode não estar no frame principal. Reporta onde está.
+    if (req.query.frames === '1') {
+      const frames = []
+      for (const f of client.pupPage.frames()) {
+        let info = { url: (f.url() || '').slice(0, 120), store: null, wwebjs: null, globais: [] }
+        try {
+          const g = await f.evaluate(() => ({
+            store: typeof window.Store,
+            wwebjs: typeof window.WWebJS,
+            globais: Object.keys(window).filter((k) => /store|wweb|wpp|moduleRaid|require/i.test(k)).slice(0, 25),
+          }))
+          info = { ...info, ...g }
+        } catch (e) { info.erro = e.message }
+        frames.push(info)
+      }
+      return res.json({ frames })
+    }
     const out = await client.pupPage.evaluate((alvo) => {
       const r = { temStore: typeof window.Store !== 'undefined', chaves: [], grupos: [], mensagens: [], erros: [] }
       if (!r.temStore) return r
