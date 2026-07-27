@@ -1259,8 +1259,29 @@ app.get('/api/prospeccao/raw', async (req, res) => {
     }
     const out = await client.pupPage.evaluate((alvo) => {
       const r = { temStore: typeof window.Store !== 'undefined', chaves: [], grupos: [], mensagens: [], erros: [] }
-      if (!r.temStore) return r
-      try { r.chaves = Object.keys(window.Store).filter((k) => /^(Chat|Msg|GroupMetadata|Contact)$/.test(k)) } catch (e) { r.erros.push('chaves: ' + e.message) }
+      // window.Store não foi exposto pelo whatsapp-web.js neste build (daí o erro
+      // 'r' nos wrappers), mas o require interno do WhatsApp está disponível —
+      // então remontamos as coleções na mão.
+      if (!r.temStore) {
+        for (const mod of ['WAWebCollections', 'WAWebChatCollection', 'WAWebMsgCollection']) {
+          try {
+            const m = window.require(mod)
+            if (m?.ChatCollection || m?.Chat) {
+              window.Store = window.Store || {}
+              window.Store.Chat = m.ChatCollection || m.Chat
+              window.Store.Msg = m.MsgCollection || m.Msg || window.Store.Msg
+              r.chaves.push(`recuperado de ${mod}`)
+            } else if (m?.MsgCollection || m?.Msg) {
+              window.Store = window.Store || {}
+              window.Store.Msg = m.MsgCollection || m.Msg
+              r.chaves.push(`msgs de ${mod}`)
+            }
+          } catch (e) { r.erros.push(`${mod}: ${e.message}`) }
+        }
+        r.temStore = !!(window.Store && window.Store.Chat)
+        if (!r.temStore) return r
+      }
+      try { r.chaves.push(...Object.keys(window.Store).filter((k) => /^(Chat|Msg|GroupMetadata|Contact)$/.test(k))) } catch (e) { r.erros.push('chaves: ' + e.message) }
       try {
         const chats = window.Store.Chat.getModelsArray()
         r.grupos = chats
