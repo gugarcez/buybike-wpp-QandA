@@ -1231,6 +1231,45 @@ app.post('/api/prospeccao/processar', async (req, res) => {
   }
 })
 
+// Último recurso: fala com o Store CRU da página, por baixo dos wrappers do
+// whatsapp-web.js (que quebram com erro 'r'). Read-only — só lista chats e lê
+// mensagens já carregadas na memória da página. Se isto também falhar, não há
+// caminho remoto pro histórico e o texto tem que vir por fora.
+app.get('/api/prospeccao/raw', async (req, res) => {
+  if (!autorizado(req)) return res.status(401).json({ erro: 'token inválido' })
+  if (!state.ready) return res.status(409).json({ erro: 'WhatsApp não conectado ainda.' })
+  const jid = String(req.query.jid || '').trim() || null
+  try {
+    const out = await client.pupPage.evaluate((alvo) => {
+      const r = { temStore: typeof window.Store !== 'undefined', chaves: [], grupos: [], mensagens: [], erros: [] }
+      if (!r.temStore) return r
+      try { r.chaves = Object.keys(window.Store).filter((k) => /^(Chat|Msg|GroupMetadata|Contact)$/.test(k)) } catch (e) { r.erros.push('chaves: ' + e.message) }
+      try {
+        const chats = window.Store.Chat.getModelsArray()
+        r.grupos = chats
+          .filter((c) => String(c.id?._serialized || c.id).endsWith('@g.us'))
+          .map((c) => ({ id: String(c.id?._serialized || c.id), nome: c.name || c.formattedTitle || null }))
+      } catch (e) { r.erros.push('Chat.getModelsArray: ' + e.message) }
+      if (alvo) {
+        try {
+          r.mensagens = window.Store.Msg.getModelsArray()
+            .filter((m) => String(m.id?.remote?._serialized || m.id?.remote || '') === alvo)
+            .map((m) => ({
+              em: new Date((m.t || 0) * 1000).toISOString(),
+              autor: String(m.author?._serialized || m.author || m.from?._serialized || ''),
+              tipo: m.type,
+              corpo: String(m.body || m.caption || '').slice(0, 1200),
+            }))
+        } catch (e) { r.erros.push('Msg.getModelsArray: ' + e.message) }
+      }
+      return r
+    }, jid)
+    res.json(out)
+  } catch (e) {
+    res.status(500).json({ erro: e.message })
+  }
+})
+
 app.get('/healthz', (_req, res) => res.json({ ok: true, ready: state.ready }))
 
 app.get('/', (req, res) => {
