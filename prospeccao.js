@@ -191,6 +191,16 @@ export function mensagemReivindicacao({ vendedorNome, titulo, preco, claimUrl })
 // (chamada hub4-import) antes desta mensagem ser gerada.
 // Variante pros rascunhos SEM foto: não promete anúncio pronto (pede as fotos) e
 // omite o preço. DRIFT: cópia de mensagemBoasVindas() em lib/hub4-extract.js.
+// Nome pra tratar o vendedor. Sem nome no card, cai no @ do Instagram — "Oi!"
+// seco em DM fria e pior. DRIFT: copia de nomeDoVendedor() em lib/hub4-extract.js.
+export function nomeDoVendedor({ vendedorNome, instagram }) {
+  const nome = (vendedorNome || '').trim()
+  if (nome) return nome
+  const handle = String(instagram || '').replace(/^@+/, '').trim()
+  if (!handle) return null
+  return handle.replace(/^[._-]+|[._-]+$/g, '') || null
+}
+
 export function mensagemBoasVindas({ vendedorNome, titulo, claimUrl, operador = 'Gustavo' }) {
   const primeiroNome = (vendedorNome || '').trim().split(/\s+/)[0]
   const saudacao = primeiroNome ? `Oi ${primeiroNome}!` : 'Oi!'

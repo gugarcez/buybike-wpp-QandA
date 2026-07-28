@@ -7,7 +7,7 @@ import { dirname, join } from 'path'
 import { readdirSync, rmSync, existsSync, writeFileSync, readFileSync } from 'fs'
 
 import { responderComoClaudia, CLAUDIA_SUPPRESS, RESPOSTA_MOCK } from './claudia.js'
-import { extrairPost, mensagemReivindicacao, mensagemPessoal, mensagemBoasVindas } from './prospeccao.js'
+import { extrairPost, mensagemReivindicacao, mensagemPessoal, mensagemBoasVindas, nomeDoVendedor } from './prospeccao.js'
 
 const { Client, LocalAuth } = pkg
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -811,20 +811,20 @@ async function processarPostGrupo(post) {
     transmissao_grupo: dados.transmissao_grupo || null,
     cidade: dados.cidade || '',
     original_phone: tel,
-    original_vendedor: dados.vendedorNome || null,
+    original_vendedor: nomeDoVendedor(dados),
     fotosBase64: post.fotosBase64 || [],
   }
 
   if (PROSPECCAO_DRY_RUN) {
     const claimUrl = `${BUYBIKE_API_URL}/claim/<uuid-dry-run>`
     if (PROSPECCAO_MODO === 'push') {
-      const dm = mensagemPessoal({ vendedorNome: dados.vendedorNome, titulo, preco: dados.preco, claimUrl, operador: OPERADOR_NOME })
+      const dm = mensagemPessoal({ vendedorNome: nomeDoVendedor(dados), titulo, preco: dados.preco, claimUrl, operador: OPERADOR_NOME })
       const waLink = `https://wa.me/${tel}?text=${encodeURIComponent(dm)}`
       const alvo = OPERADOR_NUMERO ? `${OPERADOR_NOME} (${OPERADOR_NUMERO})` : 'OPERADOR — ⚠️ OPERADOR_NUMERO não setado'
       const igTxt = dados.instagram ? ` + IG @${dados.instagram} (instagram.com/${dados.instagram})` : ''
       pushLog(`[DRY-RUN/push] criaria anúncio (${payload.fotosBase64.length} foto[s]) + avisaria ${alvo} com link: ${waLink}${igTxt}`)
     } else {
-      const dm = mensagemReivindicacao({ vendedorNome: dados.vendedorNome, titulo, preco: dados.preco, claimUrl })
+      const dm = mensagemReivindicacao({ vendedorNome: nomeDoVendedor(dados), titulo, preco: dados.preco, claimUrl })
       pushLog(`[DRY-RUN/auto] criaria anúncio (${payload.fotosBase64.length} foto[s]) + mandaria DM pra ${tel}: ${dm}`)
     }
     // Marca no dedup pra o dry-run não logar o mesmo post a cada debounce.
@@ -834,7 +834,7 @@ async function processarPostGrupo(post) {
   }
 
   // Real: enfileira o lead; o worker faz a chamada de API + push com throttle.
-  prospeccao.fila.push({ tel, titulo, vendedorNome: dados.vendedorNome, preco: dados.preco, instagram: dados.instagram || null, payload })
+  prospeccao.fila.push({ tel, titulo, vendedorNome: nomeDoVendedor(dados), preco: dados.preco, instagram: dados.instagram || null, payload })
   salvarProspeccao()
   pushLog(`[prospeccao] lead enfileirado: ${titulo} → ${tel} (fila: ${prospeccao.fila.length}).`)
 }
@@ -1222,7 +1222,7 @@ app.post('/api/prospeccao/testar', async (req, res) => {
     const montar = PROSPECCAO_MODO === 'push' ? mensagemPessoal : mensagemReivindicacao
     const dm = dados.ehAnuncioBike
       ? montar({
-          vendedorNome: dados.vendedorNome,
+          vendedorNome: nomeDoVendedor(dados),
           titulo: dados.titulo,
           preco: dados.preco,
           claimUrl: `${BUYBIKE_API_URL}/claim/<uuid-placeholder>`,
@@ -1254,7 +1254,7 @@ app.post('/api/prospeccao/test-push', async (req, res) => {
     const tel = normalizar(dados.telefone)
     if (!tel && !dados.instagram) return res.status(400).json({ erro: 'Anúncio sem telefone nem @ de contato.', dados })
     const { push } = await montarPushProspeccao({
-      tel, titulo: dados.titulo, vendedorNome: dados.vendedorNome, preco: dados.preco,
+      tel, titulo: dados.titulo, vendedorNome: nomeDoVendedor(dados), preco: dados.preco,
       instagram: dados.instagram, claimUrl: `${BUYBIKE_API_URL}/claim/TESTE`, teste: true,
     })
     const opId = await client.getNumberId(OPERADOR_NUMERO)
