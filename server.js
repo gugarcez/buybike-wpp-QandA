@@ -873,7 +873,10 @@ async function rodarProspeccao() {
     try {
       if (!PROSPECCAO_ENABLED || PROSPECCAO_DRY_RUN || !prospeccao.fila.length) { await sleep(30000); continue }
       if (!state.ready) { await sleep(30000); continue }
-      if (!janelaAberta()) { await sleep(60000); continue }
+      // A janela 9h-18h é freio anti-ban pra mensagem a VENDEDOR (modo auto). No
+      // modo push a única mensagem vai pro celular do próprio operador, que pediu
+      // pra ser avisado — segurar o aviso dele até as 9h só atrasa o trabalho.
+      if (PROSPECCAO_MODO !== 'push' && !janelaAberta()) { await sleep(60000); continue }
       if (state.disparo.enviando) { await sleep(5000); continue } // cede pro disparo manual
 
       const lead = prospeccao.fila[0]
@@ -1006,7 +1009,9 @@ rodarProspeccao().catch((e) => pushLog('[prospecção] worker morreu: ' + e.mess
 
 // ─── Página de QR / status / disparo ──────────────────────────────────────────
 const app = express()
-app.use(express.json())
+// 25mb: o /api/prospeccao/processar recebe fotos em base64 (que infla ~33%), e o
+// default de 100kb do express derrubava anúncio com foto grande (413).
+app.use(express.json({ limit: '25mb' }))
 
 function autorizado(req) {
   if (!ADMIN_TOKEN) return true // sem token configurado → aberto (use em local)
