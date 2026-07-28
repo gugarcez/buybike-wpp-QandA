@@ -196,9 +196,12 @@ export function mensagemPessoal({ vendedorNome, titulo, preco, claimUrl, operado
   const tituloTxt = titulo || 'sua bike'
   const comPreco = precoFmt ? ` (${precoFmt})` : ''
   return (
-    `${saudacao} Vi sua ${tituloTxt}${comPreco} no Hub4. Sou o ${operador}, da Buybike — ` +
-    `marketplace de bikes premium. Já deixei um rascunho do anúncio dela montado pra você ` +
-    `aparecer pra compradores do Brasil todo, grátis e sem comissão (o contato vem direto pra você). ` +
-    `É só revisar e publicar aqui: ${claimUrl} — leva uns 30s. Qualquer coisa, me chama!`
+    // DRIFT: cópia de mensagemProspeccao() em lib/hub4-extract.js (o app). Mudou
+    // uma, mude a outra — senão o push de anúncio novo (bot) sai com um texto e a
+    // tela /marketing/prospeccao com outro. Enxuta de propósito: o WhatsApp corta
+    // a prévia em ~300 chars, e o link precisa aparecer antes do "Ler mais".
+    `${saudacao} Vi sua ${tituloTxt}${comPreco} no Hub4. Sou o ${operador}, da Buybike.com.br — ` +
+    `te convido a anunciar ela no nosso site também. Já montei o rascunho: grátis, sem comissão, ` +
+    `e o comprador fala direto com você. Só revisar e publicar: ${claimUrl}`
   )
 }
