@@ -1212,15 +1212,20 @@ app.post('/api/prospeccao/testar', async (req, res) => {
   if (!texto || !texto.trim()) return res.status(400).json({ erro: 'Texto vazio.' })
   try {
     const dados = await extrairPost({ texto })
+    // Preview tem que mostrar a mensagem que REALMENTE vai sair: no modo push é a
+    // do operador (mensagemPessoal). Antes mostrava sempre a da Cláudia (modo auto,
+    // desligado), então a ferramenta de teste mentia sobre o texto enviado.
+    const montar = PROSPECCAO_MODO === 'push' ? mensagemPessoal : mensagemReivindicacao
     const dm = dados.ehAnuncioBike
-      ? mensagemReivindicacao({
+      ? montar({
           vendedorNome: dados.vendedorNome,
           titulo: dados.titulo,
           preco: dados.preco,
           claimUrl: `${BUYBIKE_API_URL}/claim/<uuid-placeholder>`,
+          operador: OPERADOR_NOME,
         })
       : null
-    res.json({ dados, dm })
+    res.json({ dados, dm, modo: PROSPECCAO_MODO })
   } catch (e) {
     res.status(500).json({ erro: e.message })
   }
