@@ -189,6 +189,19 @@ export function mensagemReivindicacao({ vendedorNome, titulo, preco, claimUrl })
 // wa.me do push. Quem envia é o operador, tocando o link no próprio WhatsApp — não
 // há disparo automático pro vendedor. Honesta: o rascunho REALMENTE já foi montado
 // (chamada hub4-import) antes desta mensagem ser gerada.
+// Variante pros rascunhos SEM foto: não promete anúncio pronto (pede as fotos) e
+// omite o preço. DRIFT: cópia de mensagemBoasVindas() em lib/hub4-extract.js.
+export function mensagemBoasVindas({ vendedorNome, titulo, claimUrl, operador = 'Gustavo' }) {
+  const primeiroNome = (vendedorNome || '').trim().split(/\s+/)[0]
+  const saudacao = primeiroNome ? `Oi ${primeiroNome}!` : 'Oi!'
+  const tituloTxt = titulo || 'sua bike'
+  return (
+    `${saudacao} Vi sua ${tituloTxt} no Hub4. Sou o ${operador}, da Buybike.com.br — ` +
+    `te convido a anunciar ela no nosso site também. Já adiantei o rascunho com as specs, ` +
+    `só faltam as fotos (1 min). Grátis, sem comissão, e o comprador fala direto com você: ${claimUrl}`
+  )
+}
+
 export function mensagemPessoal({ vendedorNome, titulo, preco, claimUrl, operador = 'Gustavo' }) {
   const primeiroNome = (vendedorNome || '').trim().split(/\s+/)[0]
   const saudacao = primeiroNome ? `Oi ${primeiroNome}!` : 'Oi!'

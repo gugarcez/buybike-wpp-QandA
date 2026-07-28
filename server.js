@@ -7,7 +7,7 @@ import { dirname, join } from 'path'
 import { readdirSync, rmSync, existsSync, writeFileSync, readFileSync } from 'fs'
 
 import { responderComoClaudia, CLAUDIA_SUPPRESS, RESPOSTA_MOCK } from './claudia.js'
-import { extrairPost, mensagemReivindicacao, mensagemPessoal } from './prospeccao.js'
+import { extrairPost, mensagemReivindicacao, mensagemPessoal, mensagemBoasVindas } from './prospeccao.js'
 
 const { Client, LocalAuth } = pkg
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -861,8 +861,12 @@ async function encurtar(url) {
   }
 }
 
-async function montarPushProspeccao({ tel, titulo, vendedorNome, preco, instagram, claimUrl, teste = false }) {
-  const dm = mensagemPessoal({ vendedorNome, titulo, preco, claimUrl, operador: OPERADOR_NOME })
+async function montarPushProspeccao({ tel, titulo, vendedorNome, preco, instagram, claimUrl, semFoto = false, teste = false }) {
+  // Sem foto no rascunho, a mensagem não pode prometer anúncio pronto — vai a
+  // variante que pede as fotos e omite o preço (mesma regra da tela do admin).
+  const dm = semFoto
+    ? mensagemBoasVindas({ vendedorNome, titulo, claimUrl, operador: OPERADOR_NOME })
+    : mensagemPessoal({ vendedorNome, titulo, preco, claimUrl, operador: OPERADOR_NOME })
   const waLinkLongo = `https://wa.me/${tel}?text=${encodeURIComponent(dm)}`
   const waLink = await encurtar(waLinkLongo)
   const igLink = instagram ? `https://instagram.com/${instagram}` : null
@@ -946,7 +950,7 @@ async function rodarProspeccao() {
           // WhatsApp dele. Ele toca o link → abre o chat com o vendedor com a msg
           // pronta → ELE envia. Envio humano, do número dele — sem disparo automático.
           if (!OPERADOR_NUMERO) throw new Error('OPERADOR_NUMERO não configurado (modo push)')
-          const { push, waLink } = await montarPushProspeccao({ tel, titulo, vendedorNome, preco, instagram, claimUrl })
+          const { push, waLink } = await montarPushProspeccao({ tel, titulo, vendedorNome, preco, instagram, claimUrl, semFoto: !payload?.fotosBase64?.length })
           const opId = await client.getNumberId(OPERADOR_NUMERO)
           if (!opId) throw new Error(`OPERADOR_NUMERO sem WhatsApp: ${OPERADOR_NUMERO}`)
           await client.sendMessage(opId._serialized, push)
