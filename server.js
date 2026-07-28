@@ -681,10 +681,20 @@ async function bufferarMsgGrupo(msg, jid) {
     }
 
     if (msg.type === 'image') {
-      const media = await msg.downloadMedia()
-      // media.data é base64 cru (sem prefixo data:...;base64,) — passa direto pra API.
-      if (media?.data) buf.fotosBase64.push(media.data)
-      pushLog(`[prospeccao] foto recebida do grupo ${jid} (${buf.fotosBase64.length} no buffer).`)
+      // downloadMedia() caiu junto com o store do whatsapp-web.js (erro 'r'). É
+      // esperado hoje, não pane: o app cai na capa do post do IG que o card linka.
+      // Isolado num try próprio pra não abortar o buffer — o card de texto, que é
+      // o que realmente importa, chega em outra mensagem e precisa ser bufferado.
+      try {
+        const media = await msg.downloadMedia()
+        // media.data é base64 cru (sem prefixo data:…;base64,) — vai direto pra API.
+        if (media?.data) {
+          buf.fotosBase64.push(media.data)
+          pushLog(`[prospeccao] foto recebida do grupo ${jid} (${buf.fotosBase64.length} no buffer).`)
+        }
+      } catch (e) {
+        pushLog(`[prospeccao] foto do WhatsApp indisponível (${e.message}) — usará a capa do Instagram.`)
+      }
     } else if (corpo) {
       buf.texto = corpo // card de texto mais recente vence
       pushLog(`[prospeccao] card de texto recebido (${jid}): "${corpo.slice(0, 50)}"`)
