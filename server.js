@@ -813,6 +813,9 @@ async function processarPostGrupo(post) {
     original_phone: tel,
     original_vendedor: nomeDoVendedor(dados),
     fotosBase64: post.fotosBase64 || [],
+    // O card cru vai junto pro app conseguir achar o link do post no IG e usar a
+    // capa de lá — o downloadMedia daqui quebrou com o store do whatsapp-web.js.
+    texto: post.texto || null,
     // Data do post no GRUPO, que é diferente de quando o rascunho é criado — é ela
     // que diz se o lead está quente. Sem isso o painel só saberia a data do import.
     origem_postado_em: post.postadoEm ? new Date(post.postadoEm).toISOString() : null,
