@@ -842,9 +842,29 @@ async function processarPostGrupo(post) {
 // Monta o texto do push pro operador (usado pelo worker e pelo endpoint de teste).
 // Retorna { push, waLink }. Com teste=true, marca como teste e avisa que o rascunho
 // é placeholder — pra não reencaminhar pro vendedor sem querer.
-function montarPushProspeccao({ tel, titulo, vendedorNome, preco, instagram, claimUrl, teste = false }) {
+// O WhatsApp para de linkar uma URL longa no meio dela: um wa.me com ?text=
+// grande chega quebrado no push e o operador não consegue tocar. Encurtar
+// resolve — o app tem /l/<code> justamente pra isso. Best-effort: se falhar,
+// devolve a URL longa (melhor um link feio que push nenhum).
+async function encurtar(url) {
+  try {
+    const resp = await fetch(`${BUYBIKE_API_URL}/api/admin/encurtar`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ADMIN_SECRET}` },
+      body: JSON.stringify({ url }),
+    })
+    if (!resp.ok) return url
+    const { short } = await resp.json()
+    return short || url
+  } catch {
+    return url
+  }
+}
+
+async function montarPushProspeccao({ tel, titulo, vendedorNome, preco, instagram, claimUrl, teste = false }) {
   const dm = mensagemPessoal({ vendedorNome, titulo, preco, claimUrl, operador: OPERADOR_NOME })
-  const waLink = `https://wa.me/${tel}?text=${encodeURIComponent(dm)}`
+  const waLinkLongo = `https://wa.me/${tel}?text=${encodeURIComponent(dm)}`
+  const waLink = await encurtar(waLinkLongo)
   const igLink = instagram ? `https://instagram.com/${instagram}` : null
   const precoTxt = Number(preco) > 0 ? ` — R$ ${Math.round(preco).toLocaleString('pt-BR')}` : ''
   const linhas = [
@@ -926,7 +946,7 @@ async function rodarProspeccao() {
           // WhatsApp dele. Ele toca o link → abre o chat com o vendedor com a msg
           // pronta → ELE envia. Envio humano, do número dele — sem disparo automático.
           if (!OPERADOR_NUMERO) throw new Error('OPERADOR_NUMERO não configurado (modo push)')
-          const { push, waLink } = montarPushProspeccao({ tel, titulo, vendedorNome, preco, instagram, claimUrl })
+          const { push, waLink } = await montarPushProspeccao({ tel, titulo, vendedorNome, preco, instagram, claimUrl })
           const opId = await client.getNumberId(OPERADOR_NUMERO)
           if (!opId) throw new Error(`OPERADOR_NUMERO sem WhatsApp: ${OPERADOR_NUMERO}`)
           await client.sendMessage(opId._serialized, push)
@@ -1224,7 +1244,7 @@ app.post('/api/prospeccao/test-push', async (req, res) => {
     if (!dados.ehAnuncioBike) return res.status(400).json({ erro: 'Não reconhecido como anúncio de bike.', dados })
     const tel = normalizar(dados.telefone)
     if (!tel && !dados.instagram) return res.status(400).json({ erro: 'Anúncio sem telefone nem @ de contato.', dados })
-    const { push } = montarPushProspeccao({
+    const { push } = await montarPushProspeccao({
       tel, titulo: dados.titulo, vendedorNome: dados.vendedorNome, preco: dados.preco,
       instagram: dados.instagram, claimUrl: `${BUYBIKE_API_URL}/claim/TESTE`, teste: true,
     })
