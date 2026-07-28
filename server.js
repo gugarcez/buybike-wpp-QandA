@@ -635,7 +635,7 @@ function flushBuffer(jid) {
   postBuffers.delete(jid)
   if (!buf.fotosBase64.length && !buf.texto) return
   const grupoNome = grupoNomeCache.get(jid) || null
-  const post = { fotosBase64: buf.fotosBase64, texto: buf.texto, grupoJid: jid, grupoNome }
+  const post = { fotosBase64: buf.fotosBase64, texto: buf.texto, grupoJid: jid, grupoNome, postadoEm: buf.startedAt }
   processarPostGrupo(post).catch((e) => pushLog(`[prospeccao] erro processando post: ${e.message}`))
 }
 
@@ -813,6 +813,9 @@ async function processarPostGrupo(post) {
     original_phone: tel,
     original_vendedor: nomeDoVendedor(dados),
     fotosBase64: post.fotosBase64 || [],
+    // Data do post no GRUPO, que é diferente de quando o rascunho é criado — é ela
+    // que diz se o lead está quente. Sem isso o painel só saberia a data do import.
+    origem_postado_em: post.postadoEm ? new Date(post.postadoEm).toISOString() : null,
   }
 
   if (PROSPECCAO_DRY_RUN) {
