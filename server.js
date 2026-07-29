@@ -757,7 +757,13 @@ async function processarPostGrupo(post) {
   const dados = await extrairPost({ texto: post.texto })
   const { ehAnuncioBike, telefone, titulo } = dados
   if (!ehAnuncioBike) {
+    const primeiraLinha = post.texto.split('\n')[0].replace(/\*/g, '').trim().slice(0, 60)
     pushLog(`[prospeccao] não é anúncio de bike — ignorado: "${post.texto.slice(0, 40)}"`)
+    // Só avisa se parecer um anúncio (tem preço): conversa solta do grupo não vira
+    // notificação, senão o aviso vira ruído e perde a função de sinal de vida.
+    if (/💵|R\$/.test(post.texto)) {
+      await avisarPulado({ titulo: primeiraLinha, preco: null, motivo: 'não é bike (acessório, roda, gear)' })
+    }
     return
   }
   if (!telefone) {
@@ -792,6 +798,7 @@ async function processarPostGrupo(post) {
   }
   if (adminsDoGrupo.has(tel)) {
     pushLog(`[prospeccao] contato ${tel} é admin do grupo (Hub4) — pulando.`)
+    await avisarPulado({ titulo, preco: dados.preco, motivo: 'bike da própria Hub4 (contato é o admin)' })
     return
   }
   // Guard do próprio número do bot: compara os últimos 8 dígitos de cada número
@@ -874,6 +881,30 @@ async function encurtar(url) {
     return short || url
   } catch {
     return url
+  }
+}
+
+// Avisa o operador de um anúncio que NÃO virou lead, com o motivo. Existe porque
+// silêncio e "bot quebrado" são indistinguíveis do lado de quem espera: passamos 3
+// dias sem push (todos os anúncios eram da própria Hub4) e a leitura foi de que o
+// bot tinha parado. Vai SEM wa.me de propósito — não é pra abordar ninguém.
+async function avisarPulado({ titulo, preco, motivo }) {
+  if (!OPERADOR_NUMERO || PROSPECCAO_DRY_RUN) return
+  try {
+    const precoTxt = Number(preco) > 0 ? ` — R$ ${Math.round(preco).toLocaleString('pt-BR')}` : ''
+    const texto = [
+      `👀 Anúncio no Hub4 que NÃO virou lead`,
+      '',
+      `*${titulo || 'Bike'}*${precoTxt}`,
+      `Motivo: ${motivo}`,
+      '',
+      'Nada a fazer — é só pra você saber que o bot está vivo e vendo o grupo.',
+    ].join('\n')
+    const opId = await client.getNumberId(OPERADOR_NUMERO)
+    if (opId) await client.sendMessage(opId._serialized, texto)
+    pushLog(`[prospeccao] aviso de pulado enviado ao operador: ${titulo} (${motivo}).`)
+  } catch (e) {
+    pushLog(`[prospeccao] falha ao avisar pulado: ${e.message}`)
   }
 }
 
