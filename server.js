@@ -963,9 +963,12 @@ async function montarPushProspeccao({ tel, titulo, vendedorNome, preco, instagra
     '📱 WhatsApp — toque pra abrir o chat com a msg pronta (é só enviar):',
     waLink,
   ]
-  if (igLink) linhas.push('', `📸 Instagram — abra o perfil e cole a mensagem: ${igLink}`, '', '✍️ Mensagem (copiar):', dm)
+  if (igLink) linhas.push('', `📸 Instagram — abra o perfil e cole a mensagem: ${igLink}`)
   if (teste) linhas.push('', '⚠️ Teste: o link do rascunho é placeholder — NÃO reencaminhe pro vendedor.')
-  return { push: linhas.join('\n'), waLink }
+  // A mensagem do vendedor NÃO vai aqui dentro: quando ela vinha junto, segurar pra
+  // copiar levava o push inteiro (cabeçalho, links, aviso) e o operador tinha que
+  // limpar na mão. Vai como mensagem separada, aí "copiar" pega só ela.
+  return { push: linhas.join('\n'), dm, waLink }
 }
 
 // Worker único da prospecção (espelha rodarCampanha): roda pra sempre, idle 30s
@@ -1030,8 +1033,9 @@ async function rodarProspeccao() {
           // pré-preenchido (mensagem na voz do operador) e avisa o OPERADOR no
           // WhatsApp dele. Ele toca o link → abre o chat com o vendedor com a msg
           // pronta → ELE envia. Envio humano, do número dele — sem disparo automático.
-          const { push, waLink } = await montarPushProspeccao({ tel, titulo, vendedorNome, preco, instagram, claimUrl, semFoto: !payload?.fotosBase64?.length })
+          const { push, dm, waLink } = await montarPushProspeccao({ tel, titulo, vendedorNome, preco, instagram, claimUrl, semFoto: !payload?.fotosBase64?.length })
           await enviarAoOperador(push)
+          await enviarAoOperador(dm) // separada: segurar e copiar pega só a mensagem
           jaProcessadosSet.add(chaveDedup(tel, titulo))
           prospeccao.pushados.push({ tel, titulo, claimUrl, waLink, instagram: instagram || null, em: new Date().toISOString() })
           pushLog(`[prospeccao] ✓ PUSH pro operador — ${titulo} → ${tel} (você toca pra enviar).`)
@@ -1339,11 +1343,12 @@ app.post('/api/prospeccao/test-push', async (req, res) => {
     if (!dados.ehAnuncioBike) return res.status(400).json({ erro: 'Não reconhecido como anúncio de bike.', dados })
     const tel = normalizar(dados.telefone)
     if (!tel && !dados.instagram) return res.status(400).json({ erro: 'Anúncio sem telefone nem @ de contato.', dados })
-    const { push } = await montarPushProspeccao({
+    const { push, dm } = await montarPushProspeccao({
       tel, titulo: dados.titulo, vendedorNome: nomeDoVendedor(dados), preco: dados.preco,
       instagram: dados.instagram, claimUrl: `${BUYBIKE_API_URL}/claim/TESTE`, teste: true,
     })
     await enviarAoOperador(push)
+    await enviarAoOperador(dm)
     pushLog(`[prospeccao] push de TESTE enviado pro operador (${OPERADOR_NUMERO}).`)
     res.json({ ok: true, enviadoPara: OPERADOR_NUMERO, dados })
   } catch (e) {
