@@ -858,6 +858,8 @@ async function processarPostGrupo(post) {
     // Data do post no GRUPO, que é diferente de quando o rascunho é criado — é ela
     // que diz se o lead está quente. Sem isso o painel só saberia a data do import.
     origem_postado_em: post.postadoEm ? new Date(post.postadoEm).toISOString() : null,
+    // O @ vai junto: a central usa como canal alternativo ao WhatsApp.
+    instagram: dados.instagram || null,
   }
 
   if (PROSPECCAO_DRY_RUN) {
