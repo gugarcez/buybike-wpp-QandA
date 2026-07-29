@@ -642,7 +642,10 @@ function flushBuffer(jid) {
 async function bufferarMsgGrupo(msg, jid) {
   try {
     if (msg.type !== 'image' && msg.type !== 'chat') {
-      return // outros tipos (sticker, áudio, etc.) não fazem parte do post
+      // Antes isto saía sem log nenhum: se um card chegasse num tipo inesperado
+      // (vídeo com legenda, documento), ele sumia e não havia como saber.
+      pushLog(`[prospeccao] msg de grupo ${jid} — tipo "${msg.type}" não tratado, ignorado.`)
+      return
     }
 
     // Identidade do grupo SEM depender do store (getChat() quebra com erro 'r'): loga
@@ -663,9 +666,15 @@ async function bufferarMsgGrupo(msg, jid) {
 
     // Fronteira por card: se um card de anúncio chega e o buffer JÁ tem um card,
     // são dois anúncios empilhados — flusha o atual e começa um novo com esta msg.
-    const corpo = msg.type === 'chat' ? (msg.body || '').trim() : ''
+    // O card pode vir como mensagem de texto OU como legenda da foto. Ler só
+    // `body` de `chat` perdia todo anúncio postado com legenda — e a perda era
+    // silenciosa, porque a imagem era bufferada normalmente.
+    const corpo = msg.type === 'chat'
+      ? (msg.body || '').trim()
+      : (msg.caption || '').trim()
+    // Vale pra card em texto E em legenda: com anúncios em rajada, é esta fronteira
+    // que impede o card novo de sobrescrever o anterior e apagá-lo do buffer.
     if (
-      msg.type === 'chat' &&
       buf &&
       pareceCardDeAnuncio(corpo) &&
       pareceCardDeAnuncio(buf.texto)
@@ -694,6 +703,10 @@ async function bufferarMsgGrupo(msg, jid) {
         }
       } catch (e) {
         pushLog(`[prospeccao] foto do WhatsApp indisponível (${e.message}) — usará a capa do Instagram.`)
+      }
+      if (corpo) {
+        buf.texto = corpo
+        pushLog(`[prospeccao] card veio na LEGENDA da foto (${jid}): "${corpo.slice(0, 50)}"`)
       }
     } else if (corpo) {
       buf.texto = corpo // card de texto mais recente vence
