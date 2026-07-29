@@ -205,11 +205,15 @@ export function mensagemBoasVindas({ vendedorNome, titulo, claimUrl, operador = 
   const primeiroNome = (vendedorNome || '').trim().split(/\s+/)[0]
   const saudacao = primeiroNome ? `Oi ${primeiroNome}!` : 'Oi!'
   const tituloTxt = titulo || 'sua bike'
-  return (
-    `${saudacao} Vi sua ${tituloTxt} no Hub4. Sou o ${operador}, da Buybike.com.br — ` +
-    `te convido a anunciar ela no nosso site também. Já adiantei o rascunho com as specs, ` +
-    `só faltam as fotos (1 min). Grátis, sem comissão, e o comprador fala direto com você: ${claimUrl}`
-  )
+  return [
+    saudacao,
+    '',
+    `Vi sua ${tituloTxt} no Hub4. Sou o ${operador}, da Buybike.com.br — te convido a anunciar ela no nosso site também.`,
+    '',
+    'Já adiantei o rascunho com as specs, só faltam as fotos (1 min). Grátis, sem comissão, e o comprador fala direto com você.',
+    '',
+    `Só revisar e publicar: ${claimUrl}`,
+  ].join('\n')
 }
 
 // DRIFT: cópia de lib/hub4-extract.js.
@@ -224,30 +228,29 @@ export function mensagemBoasVindas({ vendedorNome, titulo, claimUrl, operador = 
 export function mensagemSemLink({ vendedorNome, titulo, preco, operador = 'Gustavo' }) {
   const primeiroNome = (vendedorNome || '').trim().split(/\s+/)[0]
   const saudacao = primeiroNome ? `Oi ${primeiroNome}!` : 'Oi!'
-  const precoFmt = formatarPreco(preco)
   const tituloTxt = titulo || 'sua bike'
-  const comPreco = precoFmt ? ` (${precoFmt})` : ''
-  return (
-    `${saudacao} Sou o ${operador}, da Buybike — marketplace de bikes premium. ` +
-    `Vi sua ${tituloTxt}${comPreco} no Hub4 e montei o anúncio dela no nosso site pra você ` +
-    `aparecer pra comprador do Brasil todo, grátis e sem comissão. ` +
-    `Posso te mandar o link pra você revisar?`
-  )
+  return [
+    saudacao,
+    '',
+    `Vi sua ${tituloTxt} no Hub4. Sou o ${operador}, da Buybike — marketplace de bikes premium.`,
+    '',
+    'Montei o anúncio dela no nosso site pra você aparecer pra comprador do Brasil todo, grátis e sem comissão.',
+    '',
+    'Posso te mandar o link pra você revisar?',
+  ].join('\n')
 }
 
 export function mensagemPessoal({ vendedorNome, titulo, preco, claimUrl, operador = 'Gustavo' }) {
   const primeiroNome = (vendedorNome || '').trim().split(/\s+/)[0]
   const saudacao = primeiroNome ? `Oi ${primeiroNome}!` : 'Oi!'
-  const precoFmt = formatarPreco(preco)
   const tituloTxt = titulo || 'sua bike'
-  const comPreco = precoFmt ? ` (${precoFmt})` : ''
-  return (
-    // DRIFT: cópia de mensagemProspeccao() em lib/hub4-extract.js (o app). Mudou
-    // uma, mude a outra — senão o push de anúncio novo (bot) sai com um texto e a
-    // tela /marketing/prospeccao com outro. Enxuta de propósito: o WhatsApp corta
-    // a prévia em ~300 chars, e o link precisa aparecer antes do "Ler mais".
-    `${saudacao} Vi sua ${tituloTxt}${comPreco} no Hub4. Sou o ${operador}, da Buybike.com.br — ` +
-    `te convido a anunciar ela no nosso site também. Já montei o rascunho: grátis, sem comissão, ` +
-    `e o comprador fala direto com você. Só revisar e publicar: ${claimUrl}`
-  )
+  return [
+    saudacao,
+    '',
+    `Vi sua ${tituloTxt} no Hub4. Sou o ${operador}, da Buybike.com.br — te convido a anunciar ela no nosso site também.`,
+    '',
+    'Já montei o rascunho: grátis, sem comissão, e o comprador fala direto com você.',
+    '',
+    `Só revisar e publicar: ${claimUrl}`,
+  ].join('\n')
 }
