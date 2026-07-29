@@ -1413,7 +1413,23 @@ app.get('/api/prospeccao/raw', async (req, res) => {
   }
 })
 
-app.get('/healthz', (_req, res) => res.json({ ok: true, ready: state.ready }))
+// Saúde SEM token. Só flags operacionais — nenhum telefone, nome ou conteúdo de
+// mensagem passa por aqui. Existe assim de propósito: o watchdog roda na Vercel e
+// depender de um segredo lá cria uma dependência humana (alguém com permissão pra
+// criar env var de produção) justamente no monitor que deveria ser autônomo.
+app.get('/healthz', (_req, res) =>
+  res.json({
+    ok: true,
+    ready: state.ready,
+    qrPendente: !!state.qr,
+    prospeccaoAtiva: PROSPECCAO_ENABLED,
+    modo: PROSPECCAO_MODO,
+    gruposAlvo: GRUPO_ALVO_IDS.size,
+    adminsBlock: ADMINS_BLOCK.size,
+    fila: prospeccao.fila.length,
+    pushados: prospeccao.pushados.length,
+  })
+)
 
 app.get('/', (req, res) => {
   if (!autorizado(req)) return res.status(401).send('token inválido — use ?token=SEU_ADMIN_TOKEN')
