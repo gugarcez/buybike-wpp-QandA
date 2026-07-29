@@ -254,3 +254,17 @@ export function mensagemPessoal({ vendedorNome, titulo, preco, claimUrl, operado
     `Só revisar e publicar: ${claimUrl}`,
   ].join('\n')
 }
+
+// Impressão digital da copy, pra detectar drift entre o app e o bot (repos
+// separados, funções duplicadas — já divergiram duas vezes). Fixture fixa de
+// propósito: nome/título/preço/URL/operador constantes, senão env diferente entre
+// os dois ambientes geraria falso positivo.
+export function assinaturaCopy(fns) {
+  const args = { vendedorNome: 'Fulano', titulo: 'Bike Teste', preco: 1000, claimUrl: 'https://x/y', operador: 'Op' }
+  const texto = [fns.comLink(args), fns.semFoto(args), fns.semLink(args)].join('|')
+  let h = 5381
+  for (let i = 0; i < texto.length; i++) h = ((h * 33) ^ texto.charCodeAt(i)) >>> 0
+  return h.toString(36)
+}
+
+export const COPY_HASH = assinaturaCopy({ comLink: mensagemPessoal, semFoto: mensagemBoasVindas, semLink: mensagemSemLink })

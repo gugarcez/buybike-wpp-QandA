@@ -7,7 +7,7 @@ import { dirname, join } from 'path'
 import { readdirSync, rmSync, existsSync, writeFileSync, readFileSync } from 'fs'
 
 import { responderComoClaudia, CLAUDIA_SUPPRESS, RESPOSTA_MOCK } from './claudia.js'
-import { extrairPost, mensagemReivindicacao, mensagemPessoal, mensagemBoasVindas, mensagemSemLink, nomeDoVendedor } from './prospeccao.js'
+import { extrairPost, mensagemReivindicacao, mensagemPessoal, mensagemBoasVindas, mensagemSemLink, nomeDoVendedor, COPY_HASH } from './prospeccao.js'
 
 const { Client, LocalAuth } = pkg
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -1447,6 +1447,9 @@ app.get('/healthz', (_req, res) =>
     adminsBlock: ADMINS_BLOCK.size,
     fila: prospeccao.fila.length,
     pushados: prospeccao.pushados.length,
+    // Impressão digital da copy: o watchdog compara com a do app e avisa se as
+    // duas cópias divergirem — o push sairia diferente do que a tela mostra.
+    copyHash: COPY_HASH,
   })
 )
 
