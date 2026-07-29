@@ -7,7 +7,7 @@ import { dirname, join } from 'path'
 import { readdirSync, rmSync, existsSync, writeFileSync, readFileSync } from 'fs'
 
 import { responderComoClaudia, CLAUDIA_SUPPRESS, RESPOSTA_MOCK } from './claudia.js'
-import { extrairPost, mensagemReivindicacao, mensagemPessoal, mensagemBoasVindas, nomeDoVendedor } from './prospeccao.js'
+import { extrairPost, mensagemReivindicacao, mensagemPessoal, mensagemBoasVindas, mensagemSemLink, nomeDoVendedor } from './prospeccao.js'
 
 const { Client, LocalAuth } = pkg
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -964,11 +964,20 @@ async function montarPushProspeccao({ tel, titulo, vendedorNome, preco, instagra
     waLink,
   ]
   if (igLink) linhas.push('', `📸 Instagram — abra o perfil e cole a mensagem: ${igLink}`)
+  // As duas próximas mensagens são as opções de texto. O rótulo mora AQUI porque
+  // qualquer palavra dentro delas seria copiada junto ao segurar pra copiar.
+  linhas.push(
+    '',
+    '👇 As 2 próximas mensagens são as opções de texto:',
+    '  1ª — com o link do rascunho (mais direta)',
+    '  2ª — SEM link, termina em pergunta (mais segura em contato frio)'
+  )
   if (teste) linhas.push('', '⚠️ Teste: o link do rascunho é placeholder — NÃO reencaminhe pro vendedor.')
   // A mensagem do vendedor NÃO vai aqui dentro: quando ela vinha junto, segurar pra
   // copiar levava o push inteiro (cabeçalho, links, aviso) e o operador tinha que
   // limpar na mão. Vai como mensagem separada, aí "copiar" pega só ela.
-  return { push: linhas.join('\n'), dm, waLink }
+  const dmSemLink = mensagemSemLink({ vendedorNome, titulo, preco, operador: OPERADOR_NOME })
+  return { push: linhas.join('\n'), dm, dmSemLink, waLink }
 }
 
 // Worker único da prospecção (espelha rodarCampanha): roda pra sempre, idle 30s
@@ -1033,9 +1042,11 @@ async function rodarProspeccao() {
           // pré-preenchido (mensagem na voz do operador) e avisa o OPERADOR no
           // WhatsApp dele. Ele toca o link → abre o chat com o vendedor com a msg
           // pronta → ELE envia. Envio humano, do número dele — sem disparo automático.
-          const { push, dm, waLink } = await montarPushProspeccao({ tel, titulo, vendedorNome, preco, instagram, claimUrl, semFoto: !payload?.fotosBase64?.length })
+          const { push, dm, dmSemLink, waLink } = await montarPushProspeccao({ tel, titulo, vendedorNome, preco, instagram, claimUrl, semFoto: !payload?.fotosBase64?.length })
           await enviarAoOperador(push)
-          await enviarAoOperador(dm) // separada: segurar e copiar pega só a mensagem
+          // Separadas: segurar e copiar pega só o texto, sem cabeçalho nem rótulo.
+          await enviarAoOperador(dm)
+          await enviarAoOperador(dmSemLink)
           jaProcessadosSet.add(chaveDedup(tel, titulo))
           prospeccao.pushados.push({ tel, titulo, claimUrl, waLink, instagram: instagram || null, em: new Date().toISOString() })
           pushLog(`[prospeccao] ✓ PUSH pro operador — ${titulo} → ${tel} (você toca pra enviar).`)
@@ -1343,12 +1354,13 @@ app.post('/api/prospeccao/test-push', async (req, res) => {
     if (!dados.ehAnuncioBike) return res.status(400).json({ erro: 'Não reconhecido como anúncio de bike.', dados })
     const tel = normalizar(dados.telefone)
     if (!tel && !dados.instagram) return res.status(400).json({ erro: 'Anúncio sem telefone nem @ de contato.', dados })
-    const { push, dm } = await montarPushProspeccao({
+    const { push, dm, dmSemLink } = await montarPushProspeccao({
       tel, titulo: dados.titulo, vendedorNome: nomeDoVendedor(dados), preco: dados.preco,
       instagram: dados.instagram, claimUrl: `${BUYBIKE_API_URL}/claim/TESTE`, teste: true,
     })
     await enviarAoOperador(push)
     await enviarAoOperador(dm)
+    await enviarAoOperador(dmSemLink)
     pushLog(`[prospeccao] push de TESTE enviado pro operador (${OPERADOR_NUMERO}).`)
     res.json({ ok: true, enviadoPara: OPERADOR_NUMERO, dados })
   } catch (e) {

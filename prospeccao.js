@@ -212,6 +212,29 @@ export function mensagemBoasVindas({ vendedorNome, titulo, claimUrl, operador = 
   )
 }
 
+// DRIFT: cópia de lib/hub4-extract.js.
+// Variante SEM NENHUMA URL, pra primeira abordagem fria. Motivo: mensagem de
+// numero desconhecido com link e o formato do golpe que todo brasileiro ja
+// recebeu — a pessoa reconhece o formato e denuncia antes de ler. Termina em
+// pergunta pra puxar resposta: conversa bidirecional e a melhor protecao contra
+// bloqueio, e o link vai depois, ja autorizado.
+//
+// Assina "da Buybike" e NAO "Buybike.com.br": o WhatsApp linkifica qualquer
+// dominio, e ai a variante deixaria de ser sem link.
+export function mensagemSemLink({ vendedorNome, titulo, preco, operador = 'Gustavo' }) {
+  const primeiroNome = (vendedorNome || '').trim().split(/\s+/)[0]
+  const saudacao = primeiroNome ? `Oi ${primeiroNome}!` : 'Oi!'
+  const precoFmt = formatarPreco(preco)
+  const tituloTxt = titulo || 'sua bike'
+  const comPreco = precoFmt ? ` (${precoFmt})` : ''
+  return (
+    `${saudacao} Sou o ${operador}, da Buybike — marketplace de bikes premium. ` +
+    `Vi sua ${tituloTxt}${comPreco} no Hub4 e montei o anúncio dela no nosso site pra você ` +
+    `aparecer pra comprador do Brasil todo, grátis e sem comissão. ` +
+    `Posso te mandar o link pra você revisar?`
+  )
+}
+
 export function mensagemPessoal({ vendedorNome, titulo, preco, claimUrl, operador = 'Gustavo' }) {
   const primeiroNome = (vendedorNome || '').trim().split(/\s+/)[0]
   const saudacao = primeiroNome ? `Oi ${primeiroNome}!` : 'Oi!'
