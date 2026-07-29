@@ -897,6 +897,17 @@ async function encurtar(url) {
   }
 }
 
+// Resolve o número do operador e entrega a mensagem. Três lugares faziam isso
+// (push do lead, aviso de pulado, push de teste), cada um com um tratamento de erro
+// diferente — o do worker estourava, o do teste devolvia 400, o do aviso engolia.
+// Uma porta só: quem chama decide o que fazer com a falha.
+async function enviarAoOperador(texto) {
+  if (!OPERADOR_NUMERO) throw new Error('OPERADOR_NUMERO não configurado (modo push)')
+  const opId = await client.getNumberId(OPERADOR_NUMERO)
+  if (!opId) throw new Error(`OPERADOR_NUMERO sem WhatsApp: ${OPERADOR_NUMERO}`)
+  await client.sendMessage(opId._serialized, texto)
+}
+
 // Avisa o operador de um anúncio que NÃO virou lead, com o motivo. Existe porque
 // silêncio e "bot quebrado" são indistinguíveis do lado de quem espera: passamos 3
 // dias sem push (todos os anúncios eram da própria Hub4) e a leitura foi de que o
@@ -913,8 +924,7 @@ async function avisarPulado({ titulo, preco, motivo }) {
       '',
       'Nada a fazer — é só pra você saber que o bot está vivo e vendo o grupo.',
     ].join('\n')
-    const opId = await client.getNumberId(OPERADOR_NUMERO)
-    if (opId) await client.sendMessage(opId._serialized, texto)
+    await enviarAoOperador(texto)
     pushLog(`[prospeccao] aviso de pulado enviado ao operador: ${titulo} (${motivo}).`)
   } catch (e) {
     pushLog(`[prospeccao] falha ao avisar pulado: ${e.message}`)
@@ -1009,11 +1019,8 @@ async function rodarProspeccao() {
           // pré-preenchido (mensagem na voz do operador) e avisa o OPERADOR no
           // WhatsApp dele. Ele toca o link → abre o chat com o vendedor com a msg
           // pronta → ELE envia. Envio humano, do número dele — sem disparo automático.
-          if (!OPERADOR_NUMERO) throw new Error('OPERADOR_NUMERO não configurado (modo push)')
           const { push, waLink } = await montarPushProspeccao({ tel, titulo, vendedorNome, preco, instagram, claimUrl, semFoto: !payload?.fotosBase64?.length })
-          const opId = await client.getNumberId(OPERADOR_NUMERO)
-          if (!opId) throw new Error(`OPERADOR_NUMERO sem WhatsApp: ${OPERADOR_NUMERO}`)
-          await client.sendMessage(opId._serialized, push)
+          await enviarAoOperador(push)
           jaProcessadosSet.add(chaveDedup(tel, titulo))
           prospeccao.pushados.push({ tel, titulo, claimUrl, waLink, instagram: instagram || null, em: new Date().toISOString() })
           pushLog(`[prospeccao] ✓ PUSH pro operador — ${titulo} → ${tel} (você toca pra enviar).`)
@@ -1321,9 +1328,7 @@ app.post('/api/prospeccao/test-push', async (req, res) => {
       tel, titulo: dados.titulo, vendedorNome: nomeDoVendedor(dados), preco: dados.preco,
       instagram: dados.instagram, claimUrl: `${BUYBIKE_API_URL}/claim/TESTE`, teste: true,
     })
-    const opId = await client.getNumberId(OPERADOR_NUMERO)
-    if (!opId) return res.status(400).json({ erro: `OPERADOR_NUMERO sem WhatsApp: ${OPERADOR_NUMERO}` })
-    await client.sendMessage(opId._serialized, push)
+    await enviarAoOperador(push)
     pushLog(`[prospeccao] push de TESTE enviado pro operador (${OPERADOR_NUMERO}).`)
     res.json({ ok: true, enviadoPara: OPERADOR_NUMERO, dados })
   } catch (e) {
