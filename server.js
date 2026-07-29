@@ -764,6 +764,11 @@ async function atualizarAdminsGrupo(chat) {
 async function processarPostGrupo(post) {
   if (!post.texto) {
     pushLog('[prospeccao] post sem card de texto — ignorado.')
+    // Fotos sem card é exatamente o sintoma do bug da legenda. Se voltar, quero
+    // saber pelo WhatsApp e não por alguém reclamando dias depois.
+    if (post.fotosBase64?.length) {
+      await avisarPulado({ titulo: '(fotos sem card)', preco: null, motivo: 'chegaram fotos mas nenhum texto de anúncio — verificar' })
+    }
     return
   }
 
@@ -781,6 +786,7 @@ async function processarPostGrupo(post) {
   }
   if (!telefone) {
     pushLog(`[prospeccao] anúncio "${titulo}" sem telefone de contato — ignorado.`)
+    await avisarPulado({ titulo, preco: dados.preco, motivo: 'sem telefone no card (só @ ou nada)' })
     return
   }
 
@@ -804,6 +810,9 @@ async function processarPostGrupo(post) {
   // pulamos por segurança — jamais arriscar contato com um admin Hub4.
   if (adminsDoGrupo.size === 0) {
     pushLog(`[prospecção] admins não resolvidos e ADMINS_BLOCK vazia — pulando por segurança: ${tel}`)
+    // Este gate mata TODO lead enquanto durar. Sem aviso, a operação inteira para
+    // e parece só "não teve anúncio hoje".
+    await avisarPulado({ titulo, preco: dados.preco, motivo: 'ADMINS_BLOCK vazia — configure pra destravar os leads' })
     return
   }
   if (!dinamicoOk) {
@@ -1041,6 +1050,10 @@ async function rodarProspeccao() {
       } catch (e) {
         pushLog(`[prospeccao] ✗ ${tel} — erro: ${e.message}`)
         prospeccao.falhas.push({ tel, titulo, erro: e.message, em: new Date().toISOString() })
+        // Lead que chegou até aqui e morreu é o pior caso: o anúncio era válido e
+        // ninguém fica sabendo. O aviso vai por um caminho diferente do push (que
+        // acabou de falhar), então pode falhar também — daí o catch vazio.
+        avisarPulado({ titulo, preco, motivo: `FALHA ao processar: ${e.message}` }).catch(() => {})
       }
       prospeccao.fila.shift()
       salvarProspeccao()
