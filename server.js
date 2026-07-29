@@ -1124,7 +1124,11 @@ app.get('/api/status', (req, res) => {
       modo: PROSPECCAO_MODO,
       adminsBlockEstatica: ADMINS_BLOCK.size,
       fila: prospeccao.fila.length,
-      enviados: prospeccao.enviados.length,
+      enviados: prospeccao.enviados.length, // modo auto (desligado) — fica sempre 0
+      // O que importa no modo push. Sem isto o painel mostrava "0 enviados" mesmo
+      // depois de dezenas de pushes, porque lia o contador do modo errado.
+      pushados: prospeccao.pushados.length,
+      ultimosPushes: prospeccao.pushados.slice(-12).map((p) => ({ titulo: p.titulo, tel: p.tel, em: p.em })),
       falhas: prospeccao.falhas.length,
       jaProcessados: jaProcessadosSet.size,
     },
