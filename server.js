@@ -1380,7 +1380,10 @@ app.get('/api/prospeccao/raw', async (req, res) => {
               em: new Date((m.t || 0) * 1000).toISOString(),
               autor: String(m.author?._serialized || m.author || m.from?._serialized || ''),
               tipo: m.type,
-              corpo: String(m.body || m.caption || '').slice(0, 1200),
+              // caption separado do body: em imagem o body é o thumbnail base64 e
+              // esconderia a legenda, que é justamente onde o card pode estar.
+              caption: String(m.caption || '').slice(0, 400),
+              corpo: String(m.body || '').slice(0, 400),
             }))
         } catch (e) { r.erros.push('Msg: ' + e.message) }
       }
