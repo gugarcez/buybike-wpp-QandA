@@ -977,12 +977,12 @@ async function processarPostGrupo(post) {
 // grande chega quebrado no push e o operador não consegue tocar. Encurtar
 // resolve — o app tem /l/<code> justamente pra isso. Best-effort: se falhar,
 // devolve a URL longa (melhor um link feio que push nenhum).
-async function encurtar(url) {
+async function encurtar(url, { estavel = false } = {}) {
   try {
     const resp = await fetch(`${BUYBIKE_API_URL}/api/admin/encurtar`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ADMIN_SECRET}` },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ url, estavel }),
     })
     if (!resp.ok) return url
     const { short } = await resp.json()
@@ -1029,9 +1029,14 @@ async function avisarPulado({ titulo, preco, motivo }) {
 async function montarPushProspeccao({ tel, titulo, vendedorNome, preco, instagram, claimUrl, semFoto = false, teste = false }) {
   // Sem foto no rascunho, a mensagem não pode prometer anúncio pronto — vai a
   // variante que pede as fotos e omite o preço (mesma regra da tela do admin).
+  // Link curto ESTÁVEL só DENTRO da mensagem do vendedor. É ele que mede o funil
+  // (abordado → abriu → reivindicou), e por isso não pode ir no cabeçalho do push:
+  // ali quem clica é o operador conferindo o rascunho, e cada conferida contaria
+  // como abertura do vendedor. O cabeçalho segue com a URL crua, de propósito.
+  const claimUrlCurta = await encurtar(claimUrl, { estavel: true })
   const dm = semFoto
-    ? mensagemBoasVindas({ vendedorNome, titulo, claimUrl, operador: OPERADOR_NOME })
-    : mensagemPessoal({ vendedorNome, titulo, preco, claimUrl, operador: OPERADOR_NOME })
+    ? mensagemBoasVindas({ vendedorNome, titulo, claimUrl: claimUrlCurta, operador: OPERADOR_NOME })
+    : mensagemPessoal({ vendedorNome, titulo, preco, claimUrl: claimUrlCurta, operador: OPERADOR_NOME })
   const waLinkLongo = `https://wa.me/${tel}?text=${encodeURIComponent(dm)}`
   const waLink = await encurtar(waLinkLongo)
   const igLink = instagram ? `https://instagram.com/${instagram}` : null
