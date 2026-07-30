@@ -1173,6 +1173,7 @@ const LEMBRETE_OLX_TZ = process.env.LEMBRETE_OLX_TZ || 'Europe/Madrid'
 const LEMBRETE_OLX_PERFIL = process.env.LEMBRETE_OLX_PERFIL
   || 'https://www.olx.com.br/perfil/allbikesshop-9c251ae2'
 const LEMBRETE_OLX_LOJA = process.env.LEMBRETE_OLX_LOJA || 'ALLBIKESSHOP'
+const LEMBRETE_OLX_DEALER = Number(process.env.LEMBRETE_OLX_DEALER || 4)
 
 // Só o dia (AAAA-MM-DD) no fuso do operador — a chave que impede dois envios na
 // mesma data. Em memória de propósito: o bot reinicia raramente, e a janela de
@@ -1196,13 +1197,34 @@ async function tentarLembreteOlx() {
   if (lembreteOlxUltimoDia === dia) return
   if (hora !== LEMBRETE_OLX_HORA || minuto > 20) return
 
+  // Pergunta ao app o que entrou desde o último lembrete. Best-effort: se a API
+  // não responder, o lembrete sai sem o resumo em vez de não sair.
+  let resumo = null
+  try {
+    const r = await fetch(`${BUYBIKE_API_URL}/api/admin/loja-resumo?dealer=${LEMBRETE_OLX_DEALER}&horas=26`, {
+      headers: { Authorization: `Bearer ${ADMIN_SECRET}` },
+    })
+    if (r.ok) resumo = await r.json()
+    else pushLog(`[lembrete-olx] resumo veio ${r.status} — segue sem ele`)
+  } catch (e) {
+    pushLog(`[lembrete-olx] resumo falhou (${e.message}) — segue sem ele`)
+  }
+
+  const linhaResumo = !resumo
+    ? null
+    : resumo.novos > 0
+      ? `✅ *${resumo.novos} bike(s) entraram* desde ontem:\n` +
+        resumo.recentes.map((b) => `• ${b.titulo}`).join('\n')
+      : `Nada novo desde ontem. ${resumo.ativos} anúncio(s) da loja no ar.`
+
   const texto = [
     `🚲 *${LEMBRETE_OLX_LOJA} na OLX* — hora de importar as bikes novas.`,
+    ...(linhaResumo ? ['', linhaResumo] : []),
     '',
     LEMBRETE_OLX_PERFIL,
     '',
-    'No computador: abre o perfil, cola o extrator no console e roda o import.',
-    '_Se não tiver bike nova, ignora — o dedupe não deixa duplicar._',
+    'No computador: abre o perfil e clica no favorito "Importar pra BuyBike".',
+    '_Se aparecer "0 novas", é só fechar._',
   ].join('\n')
 
   try {
