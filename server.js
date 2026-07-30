@@ -1148,6 +1148,64 @@ client.initialize().catch((e) => {
   pushLog(`Erro ao inicializar o WhatsApp: ${e?.message}`)
 })
 
+// ── Lembrete diário: importar as bikes novas da ALLBIKESSHOP na OLX ──────────
+//
+// Mora aqui, e não num cron da Vercel, por causa da Cloud API: fora da janela de
+// 24h a Meta só entrega TEMPLATE aprovado, e nenhum dos 9 templates do app serve
+// pra recado interno (criar um novo passa por review, e já tivemos um rejeitado).
+// O WhatsApp Web que este bot usa não tem janela nem template — texto livre pra
+// qualquer contato, sempre.
+//
+// Por que o lembrete existe: a OLX responde 403 pra requisição de datacenter
+// (Cloudflare, por IP), então nem o app nem este bot conseguem ler o perfil da
+// loja. Quem lê é o navegador de uma pessoa. O lembrete é o empurrão; a
+// importação roda na máquina do operador (scripts/importar-olx.mjs no repo do app).
+//
+// Mensagem curta de propósito: chega no celular, e o trabalho é no computador.
+// Comando comprido em bolha de WhatsApp não se copia bem.
+const LEMBRETE_OLX_ATIVO = String(process.env.LEMBRETE_OLX_ATIVO || 'true') !== 'false'
+const LEMBRETE_OLX_HORA = Number(process.env.LEMBRETE_OLX_HORA || 9) // hora local BRT
+const LEMBRETE_OLX_PERFIL = process.env.LEMBRETE_OLX_PERFIL
+  || 'https://www.olx.com.br/perfil/allbikesshop-9c251ae2'
+const LEMBRETE_OLX_LOJA = process.env.LEMBRETE_OLX_LOJA || 'ALLBIKESSHOP'
+
+// Só o dia (AAAA-MM-DD) em BRT — a chave que impede dois envios na mesma data.
+// Em memória de propósito: o bot reinicia raramente, e a janela de 20 min abaixo
+// garante que um restart no meio da tarde não dispare fora de hora.
+let lembreteOlxUltimoDia = null
+
+async function tentarLembreteOlx() {
+  if (!LEMBRETE_OLX_ATIVO || !OPERADOR_NUMERO || !state.ready) return
+  // Railway roda em UTC; o horário combinado é BRT (UTC-3).
+  const agoraBrt = new Date(Date.now() - 3 * 3600 * 1000)
+  const dia = agoraBrt.toISOString().slice(0, 10)
+  if (lembreteOlxUltimoDia === dia) return
+  if (agoraBrt.getUTCHours() !== LEMBRETE_OLX_HORA || agoraBrt.getUTCMinutes() > 20) return
+
+  const texto = [
+    `🚲 *${LEMBRETE_OLX_LOJA} na OLX* — hora de importar as bikes novas.`,
+    '',
+    LEMBRETE_OLX_PERFIL,
+    '',
+    'No computador: abre o perfil, cola o extrator no console e roda o import.',
+    '_Se não tiver bike nova, ignora — o dedupe não deixa duplicar._',
+  ].join('\n')
+
+  try {
+    await enviarAoOperador(texto)
+    // Marca só após o envio dar certo: falha de rede deve tentar de novo na
+    // próxima passada, dentro da mesma janela.
+    lembreteOlxUltimoDia = dia
+    pushLog(`[lembrete-olx] enviado ao operador (${dia}).`)
+  } catch (e) {
+    pushLog(`[lembrete-olx] falhou: ${e.message}`)
+  }
+}
+
+// A cada 5 min: barato, e cobre o caso de o bot ainda estar conectando quando a
+// hora chega (state.ready false na primeira passada).
+setInterval(tentarLembreteOlx, 5 * 60 * 1000)
+
 // Retoma campanha persistida (se houver) e liga o worker multi-dia.
 carregarCampanha()
 rodarCampanha()
