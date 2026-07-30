@@ -85,6 +85,15 @@ const ADMIN_SECRET = process.env.ADMIN_SECRET || '' // bearer pro /api/admin/hub
 // Segurar não custa separação: quem separa dois anúncios agora é a fronteira
 // estrutural em bufferarMsgGrupo (card fechado + msg nova = próximo anúncio).
 const PROSPECCAO_DEBOUNCE_MS = Number(process.env.PROSPECCAO_DEBOUNCE_MS || 180000)
+// Espera DEPOIS que o card entrou: o anúncio já está completo (o grupo posta as
+// fotos e fecha com o card), então não há o que aguardar além de um álbum que ainda
+// esteja pingando. 45s cobre com folga o p90 de 16s entre fotos do mesmo bloco, e
+// evita que um anúncio avulso — ou o último da rajada — fique 3min parado.
+const PROSPECCAO_POS_CARD_MS = Number(process.env.PROSPECCAO_POS_CARD_MS || 45000)
+// Janela de álbum: só vale quando o card veio na LEGENDA da foto. As demais fotos
+// do mesmo envio chegam em segundos (mediana 5s, p90 16s) e não podem ser lidas
+// como "anúncio seguinte". 30s dá margem sem alcançar o próximo post.
+const PROSPECCAO_ALBUM_MS = Number(process.env.PROSPECCAO_ALBUM_MS || 30000)
 // Teto de idade do buffer: mesmo com msgs chegando sem parar, um buffer não vive
 // além disso — senão o post A poderia colar com o card do post B (fotos/vendedor
 // trocados). Ao estourar, o buffer atual é flushado e um novo começa. 10min porque
@@ -723,14 +732,22 @@ function bufferarMsgGrupo(msg, jid) {
     // — o grupo posta foto(s) e DEPOIS o card. Logo, tanto um 2º card (rajada) quanto
     // uma foto nova pertencem ao PRÓXIMO anúncio. Sem o caso da foto, as fotos do
     // anúncio seguinte colavam no card anterior e o post saía com a bike errada na capa.
-    if (buf && pareceCardDeAnuncio(buf.texto) && (ehCard || msg.type === 'image')) {
+    //
+    // A exceção é o card que veio em LEGENDA: aí a foto legendada é a 1ª de um álbum
+    // e as irmãs chegam logo atrás (mediana 5s entre fotos do mesmo bloco). Fechar na
+    // primeira delas partiria o anúncio e jogaria o resto fora. Só nesse caso vale a
+    // janela — no layout de card em texto o card é a última msg do anúncio, e aí foto
+    // nova é sempre anúncio novo (o histórico tem casos de 2s de intervalo).
+    const aindaNoAlbum =
+      buf && buf.cardEmLegendaEm != null && agora - buf.cardEmLegendaEm < PROSPECCAO_ALBUM_MS
+    if (buf && pareceCardDeAnuncio(buf.texto) && (ehCard || (msg.type === 'image' && !aindaNoAlbum))) {
       pushLog(`[prospeccao] anúncio seguinte no grupo ${jid} (${ehCard ? '2º card' : 'foto após card'}) — flush do anterior.`)
       flushBuffer(jid)
       buf = null
     }
 
     if (!buf) {
-      buf = { fotos: [], texto: '', timer: null, startedAt: agora }
+      buf = { fotos: [], texto: '', timer: null, startedAt: agora, cardEmLegendaEm: null }
       postBuffers.set(jid, buf)
     }
 
@@ -767,6 +784,7 @@ function bufferarMsgGrupo(msg, jid) {
       // sumia sem log. Só escreve quem é card, ou quando ainda não há card.
       if (ehCard || !pareceCardDeAnuncio(buf.texto)) {
         buf.texto = corpo
+        if (ehCard && msg.type === 'image') buf.cardEmLegendaEm = agora
         // A origem (legenda x texto) vai no mesmo log: é o que diferencia os dois
         // layouts de post do grupo quando alguém for ler o histórico procurando erro.
         pushLog(`[prospeccao] card recebido (${jid}, ${msg.type === 'image' ? 'legenda' : 'texto'}): "${corpo.slice(0, 50)}"`)
@@ -775,9 +793,13 @@ function bufferarMsgGrupo(msg, jid) {
       }
     }
 
-    // Debounce: reinicia o timer a cada msg pra agrupar foto(s) + card que chegam juntos.
+    // Fecha sozinho. A espera longa existe só ENQUANTO falta o card (em 34% dos posts
+    // ele chega mais de 30s depois da última foto). Com o card dentro, o anúncio já
+    // está completo — segurar por 3min só atrasaria o push do último anúncio da
+    // rajada, ou de um anúncio avulso, sem ganhar nada.
     if (buf.timer) clearTimeout(buf.timer)
-    buf.timer = setTimeout(() => flushBuffer(jid), PROSPECCAO_DEBOUNCE_MS)
+    const espera = pareceCardDeAnuncio(buf.texto) ? PROSPECCAO_POS_CARD_MS : PROSPECCAO_DEBOUNCE_MS
+    buf.timer = setTimeout(() => flushBuffer(jid), espera)
   } catch (e) {
     pushLog(`[prospeccao] erro no buffer: ${e.message}`)
   }
