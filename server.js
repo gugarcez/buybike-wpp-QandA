@@ -617,6 +617,25 @@ async function ehGrupoAlvo(msg, jid) {
 // sozinho.
 const postBuffers = new Map()
 
+const MEDIA_TENTATIVAS = 3
+const MEDIA_ESPERA_MS = 1500
+
+// downloadMedia() devolve `undefined` (sem jogar) quando a mídia ainda está em
+// mediaStage FETCHING/REUPLOADING — situação normal nos primeiros segundos depois
+// da mensagem chegar. Uma única tentativa lia isso como "quebrado" e o anúncio
+// caía na capa do Instagram, que é menor e vem cortada em 1:1.
+//
+// Espera entre tentativas em vez de martelar: quem resolve a mídia é o próprio
+// WhatsApp Web na aba, e o retry imediato só devolve o mesmo estado.
+async function baixarMediaComRetry(msg) {
+  for (let i = 1; i <= MEDIA_TENTATIVAS; i++) {
+    const media = await msg.downloadMedia()
+    if (media?.data) return media
+    if (i < MEDIA_TENTATIVAS) await new Promise((r) => setTimeout(r, MEDIA_ESPERA_MS))
+  }
+  return null
+}
+
 // Heurística de "card de anúncio": texto que tem PREÇO (R$) E uma sequência de
 // telefone (8+ dígitos). Serve de fronteira de commit — um 2º card no mesmo buffer
 // significa anúncio novo (não pode colar com o anterior).
@@ -690,16 +709,25 @@ async function bufferarMsgGrupo(msg, jid) {
     }
 
     if (msg.type === 'image') {
-      // downloadMedia() caiu junto com o store do whatsapp-web.js (erro 'r'). É
-      // esperado hoje, não pane: o app cai na capa do post do IG que o card linka.
-      // Isolado num try próprio pra não abortar o buffer — o card de texto, que é
+      // Esta é a foto QUE IMPORTA: o arquivo original que o vendedor mandou no
+      // grupo (1600×1200 típico). O fallback do Instagram só entrega 720×1280 já
+      // cortado, então cada falha aqui vira um anúncio com capa pior.
+      //
+      // Vale retry: logo após o `message_create` a mídia costuma estar em
+      // mediaStage FETCHING, e o downloadMedia devolve undefined sem jogar — o
+      // que antes era lido como "quebrado" e caía direto no IG.
+      //
+      // Isolado num try próprio pra não abortar o buffer: o card de texto, que é
       // o que realmente importa, chega em outra mensagem e precisa ser bufferado.
       try {
-        const media = await msg.downloadMedia()
+        const media = await baixarMediaComRetry(msg)
         // media.data é base64 cru (sem prefixo data:…;base64,) — vai direto pra API.
         if (media?.data) {
           buf.fotosBase64.push(media.data)
-          pushLog(`[prospeccao] foto recebida do grupo ${jid} (${buf.fotosBase64.length} no buffer).`)
+          const kb = Math.round((media.data.length * 3) / 4 / 1024)
+          pushLog(`[prospeccao] foto recebida do grupo ${jid} (${buf.fotosBase64.length} no buffer, ~${kb}KB).`)
+        } else {
+          pushLog(`[prospeccao] foto do grupo ${jid} não resolveu após ${MEDIA_TENTATIVAS} tentativas — usará a capa do Instagram.`)
         }
       } catch (e) {
         pushLog(`[prospeccao] foto do WhatsApp indisponível (${e.message}) — usará a capa do Instagram.`)
