@@ -1164,23 +1164,37 @@ client.initialize().catch((e) => {
 // Mensagem curta de propósito: chega no celular, e o trabalho é no computador.
 // Comando comprido em bolha de WhatsApp não se copia bem.
 const LEMBRETE_OLX_ATIVO = String(process.env.LEMBRETE_OLX_ATIVO || 'true') !== 'false'
-const LEMBRETE_OLX_HORA = Number(process.env.LEMBRETE_OLX_HORA || 9) // hora local BRT
+// Hora no FUSO DO OPERADOR, não em BRT: quem recebe está na Espanha (OPERADOR_NUMERO
+// começa com 34). A primeira versão media em UTC-3 e teria entregado o lembrete
+// às 14h de Madri. `Intl` resolve o fuso pelo nome, então horário de verão entra
+// e sai sem ninguém precisar mexer em offset.
+const LEMBRETE_OLX_HORA = Number(process.env.LEMBRETE_OLX_HORA || 9)
+const LEMBRETE_OLX_TZ = process.env.LEMBRETE_OLX_TZ || 'Europe/Madrid'
 const LEMBRETE_OLX_PERFIL = process.env.LEMBRETE_OLX_PERFIL
   || 'https://www.olx.com.br/perfil/allbikesshop-9c251ae2'
 const LEMBRETE_OLX_LOJA = process.env.LEMBRETE_OLX_LOJA || 'ALLBIKESSHOP'
 
-// Só o dia (AAAA-MM-DD) em BRT — a chave que impede dois envios na mesma data.
-// Em memória de propósito: o bot reinicia raramente, e a janela de 20 min abaixo
-// garante que um restart no meio da tarde não dispare fora de hora.
+// Só o dia (AAAA-MM-DD) no fuso do operador — a chave que impede dois envios na
+// mesma data. Em memória de propósito: o bot reinicia raramente, e a janela de
+// 20 min abaixo garante que um restart no meio da tarde não dispare fora de hora.
 let lembreteOlxUltimoDia = null
+
+// Dia e hora no fuso configurado. `en-CA` porque devolve a data já em
+// AAAA-MM-DD, que é comparável como string sem parse.
+function agoraNoFuso() {
+  const f = new Intl.DateTimeFormat('en-CA', {
+    timeZone: LEMBRETE_OLX_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(new Date())
+  const p = Object.fromEntries(f.map((x) => [x.type, x.value]))
+  return { dia: `${p.year}-${p.month}-${p.day}`, hora: Number(p.hour), minuto: Number(p.minute) }
+}
 
 async function tentarLembreteOlx() {
   if (!LEMBRETE_OLX_ATIVO || !OPERADOR_NUMERO || !state.ready) return
-  // Railway roda em UTC; o horário combinado é BRT (UTC-3).
-  const agoraBrt = new Date(Date.now() - 3 * 3600 * 1000)
-  const dia = agoraBrt.toISOString().slice(0, 10)
+  const { dia, hora, minuto } = agoraNoFuso()
   if (lembreteOlxUltimoDia === dia) return
-  if (agoraBrt.getUTCHours() !== LEMBRETE_OLX_HORA || agoraBrt.getUTCMinutes() > 20) return
+  if (hora !== LEMBRETE_OLX_HORA || minuto > 20) return
 
   const texto = [
     `🚲 *${LEMBRETE_OLX_LOJA} na OLX* — hora de importar as bikes novas.`,
