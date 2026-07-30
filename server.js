@@ -77,11 +77,20 @@ const BUYBIKE_API_URL = process.env.BUYBIKE_API_URL || 'https://www.buybike.com.
 const ADMIN_SECRET = process.env.ADMIN_SECRET || '' // bearer pro /api/admin/hub4-import
 // Debounce do pareamento: foto(s) + card de texto chegam como msgs separadas, com
 // segundos de diferença. Acumula tudo que chega do grupo e processa quando "esfria".
-const PROSPECCAO_DEBOUNCE_MS = Number(process.env.PROSPECCAO_DEBOUNCE_MS || 30000)
+//
+// 3min, não 30s: medido no histórico do Hub4 (416 anúncios), o intervalo entre a
+// ÚLTIMA foto e o card passa de 30s em 34% dos posts (p95 = 140s). Com 30s o buffer
+// fechava antes do card chegar — as fotos boas do WhatsApp viravam um post órfão
+// descartado e o anúncio saía com a capa do Instagram (menor e cortada em 1:1).
+// Segurar não custa separação: quem separa dois anúncios agora é a fronteira
+// estrutural em bufferarMsgGrupo (card fechado + msg nova = próximo anúncio).
+const PROSPECCAO_DEBOUNCE_MS = Number(process.env.PROSPECCAO_DEBOUNCE_MS || 180000)
 // Teto de idade do buffer: mesmo com msgs chegando sem parar, um buffer não vive
 // além disso — senão o post A poderia colar com o card do post B (fotos/vendedor
-// trocados). Ao estourar, o buffer atual é flushado e um novo começa.
-const PROSPECCAO_BUFFER_MAX_MS = Number(process.env.PROSPECCAO_BUFFER_MAX_MS || 90000)
+// trocados). Ao estourar, o buffer atual é flushado e um novo começa. 10min porque
+// um bloco de 12 fotos + card leva minutos pra entrar (p90 do bloco = 98s) e o teto
+// antigo de 90s partia o anúncio no meio.
+const PROSPECCAO_BUFFER_MAX_MS = Number(process.env.PROSPECCAO_BUFFER_MAX_MS || 600000)
 const PROSPECCAO_FILE = join(WWEB_AUTH, 'prospeccao.json')
 // Modo de contato com o vendedor:
 //  'push'  (padrão) → NÃO manda pro vendedor. Cria o rascunho, gera um link wa.me
@@ -212,7 +221,7 @@ client.on('message', async (msg) => {
     // ela entra no buffer de pareamento (foto[s] + card) daquele grupo.
     if (from.endsWith('@g.us')) {
       if (PROSPECCAO_ENABLED && (await ehGrupoAlvo(msg, from))) {
-        await bufferarMsgGrupo(msg, from)
+        bufferarMsgGrupo(msg, from) // síncrona de propósito — ver comentário lá
       }
       return // qualquer outro grupo (ou prospecção off) segue ignorado, como hoje
     }
@@ -612,9 +621,12 @@ async function ehGrupoAlvo(msg, jid) {
   }
 }
 
-// Buffers de pareamento POR GRUPO (jid → { fotosBase64, texto, timer, startedAt }).
+// Buffers de pareamento POR GRUPO (jid → { fotos, texto, timer, startedAt }).
 // Dois grupos Hub4 diferentes não podem misturar foto/texto, então cada um debounce
 // sozinho.
+//
+// `fotos` guarda PROMESSAS de base64, não base64 resolvido: o slot é reservado na
+// hora que a mensagem chega e o download roda em paralelo (ver bufferarMsgGrupo).
 const postBuffers = new Map()
 
 const MEDIA_TENTATIVAS = 3
@@ -646,19 +658,36 @@ function pareceCardDeAnuncio(texto) {
 }
 
 // Dispara o processamento do buffer atual de um grupo e limpa o estado (timer +
-// entrada), pra nada vazar pro próximo post.
+// entrada), pra nada vazar pro próximo post. A limpeza é SÍNCRONA de propósito: a
+// entrada sai do Map antes de qualquer await, então a mensagem seguinte já começa
+// num buffer novo em vez de escrever num que está sendo despachado.
 function flushBuffer(jid) {
   const buf = postBuffers.get(jid)
   if (!buf) return
   if (buf.timer) clearTimeout(buf.timer)
   postBuffers.delete(jid)
-  if (!buf.fotosBase64.length && !buf.texto) return
+  if (!buf.fotos.length && !buf.texto) return
   const grupoNome = grupoNomeCache.get(jid) || null
-  const post = { fotosBase64: buf.fotosBase64, texto: buf.texto, grupoJid: jid, grupoNome, postadoEm: buf.startedAt }
-  processarPostGrupo(post).catch((e) => pushLog(`[prospeccao] erro processando post: ${e.message}`))
+  // Os downloads das fotos só são esperados AQUI. Foram disparados lá atrás, quando
+  // cada mensagem chegou, e rodaram em paralelo enquanto o resto do post entrava.
+  Promise.all(buf.fotos)
+    .then((fotos) => {
+      const fotosBase64 = fotos.filter(Boolean)
+      const kb = Math.round((fotosBase64.reduce((s, f) => s + f.length, 0) * 3) / 4 / 1024)
+      pushLog(`[prospeccao] flush do grupo ${jid}: ${fotosBase64.length}/${buf.fotos.length} foto(s) (~${kb}KB) + card "${buf.texto.slice(0, 40)}"`)
+      return processarPostGrupo({ fotosBase64, texto: buf.texto, grupoJid: jid, grupoNome, postadoEm: buf.startedAt })
+    })
+    .catch((e) => pushLog(`[prospeccao] erro processando post: ${e.message}`))
 }
 
-async function bufferarMsgGrupo(msg, jid) {
+// Tudo aqui é SÍNCRONO — nenhum await até o buffer estar atualizado. O download da
+// mídia (que leva segundos) vira uma promessa guardada no slot e é resolvido só no
+// flush. Antes esta função dava `await` no download ANTES de gravar a legenda: numa
+// rajada, o card do anúncio seguinte chegava durante essa espera, via um buffer com
+// texto ainda vazio (fronteira não disparava) e sobrescrevia o card anterior. Com
+// anúncios saindo a cada ~17s, isso derrubava um a um e só o ÚLTIMO da rajada
+// sobrevivia pro debounce — que é exatamente o sintoma de "só lê a última mensagem".
+function bufferarMsgGrupo(msg, jid) {
   try {
     if (msg.type !== 'image' && msg.type !== 'chat') {
       // Antes isto saía sem log nenhum: se um card chegasse num tipo inesperado
@@ -672,6 +701,13 @@ async function bufferarMsgGrupo(msg, jid) {
     // grupo — é assim que se descobre qual JID pôr em GRUPO_ALVO_ID.
     pushLog(`[prospeccao] msg de grupo ${jid} — autor ${normalizar((msg.author || '').replace(/@.*/, '')) || '?'} (${msg.type}).`)
 
+    // O card pode vir como mensagem de texto OU como legenda da foto. Ler só `body`
+    // de `chat` perdia todo anúncio postado com legenda — e a perda era silenciosa,
+    // porque a imagem era bufferada normalmente.
+    const corpo = msg.type === 'chat'
+      ? (msg.body || '').trim()
+      : (msg.caption || '').trim()
+    const ehCard = pareceCardDeAnuncio(corpo)
     const agora = Date.now()
     let buf = postBuffers.get(jid)
 
@@ -683,28 +719,18 @@ async function bufferarMsgGrupo(msg, jid) {
       buf = null
     }
 
-    // Fronteira por card: se um card de anúncio chega e o buffer JÁ tem um card,
-    // são dois anúncios empilhados — flusha o atual e começa um novo com esta msg.
-    // O card pode vir como mensagem de texto OU como legenda da foto. Ler só
-    // `body` de `chat` perdia todo anúncio postado com legenda — e a perda era
-    // silenciosa, porque a imagem era bufferada normalmente.
-    const corpo = msg.type === 'chat'
-      ? (msg.body || '').trim()
-      : (msg.caption || '').trim()
-    // Vale pra card em texto E em legenda: com anúncios em rajada, é esta fronteira
-    // que impede o card novo de sobrescrever o anterior e apagá-lo do buffer.
-    if (
-      buf &&
-      pareceCardDeAnuncio(corpo) &&
-      pareceCardDeAnuncio(buf.texto)
-    ) {
-      pushLog(`[prospeccao] 2º card de anúncio no grupo ${jid} — flush do anterior e novo buffer.`)
+    // Fronteira estrutural: com um card já fechado no buffer, o anúncio está completo
+    // — o grupo posta foto(s) e DEPOIS o card. Logo, tanto um 2º card (rajada) quanto
+    // uma foto nova pertencem ao PRÓXIMO anúncio. Sem o caso da foto, as fotos do
+    // anúncio seguinte colavam no card anterior e o post saía com a bike errada na capa.
+    if (buf && pareceCardDeAnuncio(buf.texto) && (ehCard || msg.type === 'image')) {
+      pushLog(`[prospeccao] anúncio seguinte no grupo ${jid} (${ehCard ? '2º card' : 'foto após card'}) — flush do anterior.`)
       flushBuffer(jid)
       buf = null
     }
 
     if (!buf) {
-      buf = { fotosBase64: [], texto: '', timer: null, startedAt: agora }
+      buf = { fotos: [], texto: '', timer: null, startedAt: agora }
       postBuffers.set(jid, buf)
     }
 
@@ -717,28 +743,36 @@ async function bufferarMsgGrupo(msg, jid) {
       // mediaStage FETCHING, e o downloadMedia devolve undefined sem jogar — o
       // que antes era lido como "quebrado" e caía direto no IG.
       //
-      // Isolado num try próprio pra não abortar o buffer: o card de texto, que é
-      // o que realmente importa, chega em outra mensagem e precisa ser bufferado.
-      try {
-        const media = await baixarMediaComRetry(msg)
-        // media.data é base64 cru (sem prefixo data:…;base64,) — vai direto pra API.
-        if (media?.data) {
-          buf.fotosBase64.push(media.data)
-          const kb = Math.round((media.data.length * 3) / 4 / 1024)
-          pushLog(`[prospeccao] foto recebida do grupo ${jid} (${buf.fotosBase64.length} no buffer, ~${kb}KB).`)
-        } else {
-          pushLog(`[prospeccao] foto do grupo ${jid} não resolveu após ${MEDIA_TENTATIVAS} tentativas — usará a capa do Instagram.`)
-        }
-      } catch (e) {
-        pushLog(`[prospeccao] foto do WhatsApp indisponível (${e.message}) — usará a capa do Instagram.`)
-      }
-      if (corpo) {
+      // A promessa já nasce tratada (resolve em null no pior caso): uma foto que
+      // falha não pode derrubar o Promise.all do flush e levar o card junto.
+      buf.fotos.push(
+        baixarMediaComRetry(msg)
+          // media.data é base64 cru (sem prefixo data:…;base64,) — vai direto pra API.
+          .then((media) => {
+            if (media?.data) return media.data
+            pushLog(`[prospeccao] foto do grupo ${jid} não resolveu após ${MEDIA_TENTATIVAS} tentativas — usará a capa do Instagram.`)
+            return null
+          })
+          .catch((e) => {
+            pushLog(`[prospeccao] foto do WhatsApp indisponível (${e.message}) — usará a capa do Instagram.`)
+            return null
+          })
+      )
+      pushLog(`[prospeccao] foto recebida do grupo ${jid} (${buf.fotos.length} no buffer, baixando…).`)
+    }
+
+    if (corpo) {
+      // Conversa solta do grupo ("já vendida", "bom dia") NUNCA apaga um card que
+      // está esperando o flush — antes qualquer texto sobrescrevia e o anúncio
+      // sumia sem log. Só escreve quem é card, ou quando ainda não há card.
+      if (ehCard || !pareceCardDeAnuncio(buf.texto)) {
         buf.texto = corpo
-        pushLog(`[prospeccao] card veio na LEGENDA da foto (${jid}): "${corpo.slice(0, 50)}"`)
+        // A origem (legenda x texto) vai no mesmo log: é o que diferencia os dois
+        // layouts de post do grupo quando alguém for ler o histórico procurando erro.
+        pushLog(`[prospeccao] card recebido (${jid}, ${msg.type === 'image' ? 'legenda' : 'texto'}): "${corpo.slice(0, 50)}"`)
+      } else {
+        pushLog(`[prospeccao] texto solto no grupo ${jid} — ignorado, card pendente preservado.`)
       }
-    } else if (corpo) {
-      buf.texto = corpo // card de texto mais recente vence
-      pushLog(`[prospeccao] card de texto recebido (${jid}): "${corpo.slice(0, 50)}"`)
     }
 
     // Debounce: reinicia o timer a cada msg pra agrupar foto(s) + card que chegam juntos.
